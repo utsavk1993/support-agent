@@ -5,8 +5,11 @@ app wires together, that bad input is rejected, and that the policy still
 contains the facts the assistant is supposed to quote.
 """
 
+import asyncio
+import time
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -35,8 +38,15 @@ def fake_response(reply="A used power tool carries a 15% restocking fee.",
 
 @pytest.fixture
 def client(monkeypatch):
-    """A test client whose model call is stubbed out."""
-    monkeypatch.setattr(llm, "chat", lambda **kwargs: fake_response())
+    """A test client whose model call is stubbed out.
+
+    The stub is `async def` because the handler awaits it. A plain function
+    here fails with "can't be used in 'await' expression".
+    """
+    async def fake_chat(**kwargs):
+        return fake_response()
+
+    monkeypatch.setattr(llm, "chat", fake_chat)
     return TestClient(main.app)
 
 
@@ -63,7 +73,7 @@ def test_policy_is_sent_as_the_first_message(client, monkeypatch):
     """The policy must lead the prompt, or prefix caching cannot work."""
     captured = {}
 
-    def capture(**kwargs):
+    async def capture(**kwargs):
         captured.update(kwargs)
         return fake_response()
 
@@ -99,3 +109,39 @@ def test_message_model_requires_both_fields():
 ])
 def test_policy_contains_key_facts(fact):
     assert fact in SUPPORT_POLICY
+
+
+def test_requests_are_handled_concurrently(monkeypatch):
+    """Requests should overlap, not queue up behind one another.
+
+    This is the regression test for the blocking request path. With a sync
+    handler, FastAPI gives each request one thread from a pool of 40 and
+    holds it for the whole request, so 50 at once would run as two batches
+    and take roughly twice the delay. Async holds no thread while waiting.
+    """
+    delay = 0.2
+    requests = 50
+
+    async def slow_chat(**kwargs):
+        await asyncio.sleep(delay)
+        return fake_response()
+
+    monkeypatch.setattr(llm, "chat", slow_chat)
+
+    async def fire_all_at_once():
+        transport = httpx.ASGITransport(app=main.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as sender:
+            body = {"messages": [{"role": "user", "content": "hi"}]}
+            started = time.perf_counter()
+            responses = await asyncio.gather(
+                *[sender.post("/api/chat", json=body) for _ in range(requests)]
+            )
+            return time.perf_counter() - started, responses
+
+    elapsed, responses = asyncio.run(fire_all_at_once())
+
+    assert all(r.status_code == 200 for r in responses)
+
+    # One after another would be 50 x 0.2s = 10s. Overlapping should land
+    # near 0.2s; allow generous headroom so a slow CI runner doesn't flake.
+    assert elapsed < delay * 5, f"{requests} requests took {elapsed:.2f}s — they queued"

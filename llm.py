@@ -6,16 +6,16 @@ or knows which model we use. That way, switching models, switching providers,
 or changing how we handle failures is a change to ONE file.
 """
 
+import asyncio  # Pauses between retries WITHOUT freezing everyone else. See the note further down.
 import os  # Read environment variables (like process.env in Node), and build file paths.
 import random  # Adds a random bit to the retry wait, so every copy of the app doesn't retry at the same instant.
-import time  # Pauses between retries, so we don't hammer a struggling server.
 
 from dotenv import load_dotenv  # Reads the .env file holding our API key. .env is listed in .gitignore, so it never gets committed.
 from openai import (
     APIConnectionError,  # never reached the server at all
     APITimeoutError,  # reached it, but it never replied
+    AsyncOpenAI,  # the non-blocking version of the client
     InternalServerError,  # the server broke. Their fault, not ours
-    OpenAI,
     RateLimitError,  # we're sending too fast
 )
 
@@ -32,7 +32,10 @@ MODEL = "nvidia/nemotron-3-super-120b-a12b"
 # Build the connection once, when this file is first imported, and share it.
 # Reusing one client keeps the connection to the server open between calls,
 # so we don't redo the setup handshake every single time.
-client = OpenAI(
+# AsyncOpenAI is the same client as OpenAI, with one difference: while it
+# waits for a reply, it hands control back so the server can get on with
+# other people's requests. The plain OpenAI client just sits there.
+client = AsyncOpenAI(
     # This URL is what makes it NVIDIA rather than OpenAI. The library itself
     # doesn't care who it's talking to.
     base_url="https://integrate.api.nvidia.com/v1",
@@ -68,11 +71,17 @@ MAX_ATTEMPTS = 4
 # a short fixed wait burns all our tries before it's ready.
 BACKOFF_BASE = 0.6
 
-def chat(**kwargs):
+async def chat(**kwargs):
     """Send a request to the model. If it fails for a silly reason, try again.
 
-    Use it exactly like the normal call — same arguments in, same answer out.
-    The retrying is invisible except for a printed line when it happens.
+    Same arguments in, same answer out. Two things to know:
+
+      `async def` means this function can pause in the middle. While it is
+      paused waiting for the model, the server is free to serve other people
+      instead of sitting idle.
+
+      Because it can pause, callers write `await llm.chat(...)`. The `await`
+      says "wait here for the answer, but let other work happen meanwhile".
     """
     # Somewhere to keep the last error we saw.
     #
@@ -83,9 +92,10 @@ def chat(**kwargs):
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            # The real call. If it works, we return here and the retry code
-            # below never runs.
-            return client.chat.completions.create(**kwargs)
+            # The real call. `await` pauses here until the model replies,
+            # letting other requests run in the meantime.
+            # If it works, we return and the retry code below never runs.
+            return await client.chat.completions.create(**kwargs)
 
         except RETRYABLE as e:
             last_error = e
@@ -108,7 +118,16 @@ def chat(**kwargs):
             print(f"  [retry {attempt}/{MAX_ATTEMPTS - 1}] "
                   f"{type(e).__name__} - waiting {delay:.1f}s")
 
-            time.sleep(delay)
+            # THE MOST IMPORTANT LINE IN THIS FILE.
+            #
+            # time.sleep() would freeze the ENTIRE server for this long —
+            # every user, mid-sentence, not just the one who hit the error.
+            # One unlucky retry and everybody stops.
+            #
+            # asyncio.sleep() says "wake me in a moment, go do something
+            # useful meanwhile". Same pause for this request, no effect on
+            # anyone else.
+            await asyncio.sleep(delay)
 
     # Everything failed. Throw the real error so the caller sees exactly what
     # went wrong. Returning nothing here would hide the problem.
