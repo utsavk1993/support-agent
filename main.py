@@ -76,7 +76,7 @@ class ChatRequest(BaseModel):
 # The @ line is a "decorator". It attaches the function below it to a URL.
 # Same idea as app.get("/", handler) in Express.
 @app.get("/")
-def serve_page():
+async def serve_page():
     """When someone visits the site, send them the chat page."""
     return FileResponse(STATIC_DIR / "index.html")
 
@@ -85,12 +85,20 @@ def serve_page():
 # ROUTE 2: the actual chat
 # ---------------------------------------------------------------------------
 @app.post("/api/chat")
-def chat(request: ChatRequest):
+async def chat(request: ChatRequest):
     """Take the conversation, ask the model, hand back its reply.
 
     That `request: ChatRequest` part is doing real work. FastAPI reads the
     incoming JSON, checks it matches the shape we defined above, and gives
     us a proper Python object. Bad input never reaches this line.
+
+    `async def` matters here. A plain `def` handler gets one thread from a
+    pool of 40 and holds it for the whole request, so the 41st person to
+    arrive at once waits for someone else to finish. An `async def` handler
+    holds no thread while it waits, so thousands can be in flight.
+
+    The rule that comes with it: nothing in here may block. Any slow call
+    must be awaited, or the whole server stops for everyone.
     """
 
     # Build what we actually send to the model.
@@ -110,7 +118,7 @@ def chat(request: ChatRequest):
 
     # Ask the model. llm.chat handles the retrying if the server has a wobble.
     try:
-        response = llm.chat(
+        response = await llm.chat(
             model=llm.MODEL,
             messages=model_messages,
             # The longest reply we'll allow. A safety belt: without it, a
