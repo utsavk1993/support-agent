@@ -1,0 +1,48 @@
+name: CI
+
+# Run on every push to main, and on every pull request targeting it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    env:
+      # The client is constructed at import time and refuses to build without
+      # a key, so CI needs *a* value here. Nothing in the test suite makes a
+      # real API call — the model is stubbed out — so a placeholder is enough
+      # and no real secret is needed.
+      NVIDIA_API_KEY: dummy-key-not-used-in-tests
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        run: pytest -q
+
+      - name: Check the app actually starts
+        # Lint and tests both run against imported code. This catches the
+        # case where the app imports fine but dies on startup.
+        run: |
+          uvicorn main:app --port 8000 &
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:8000/ > /dev/null && break
+            sleep 0.5
+          done
+          curl -sf http://127.0.0.1:8000/ > /dev/null
+          echo "app served the page successfully"

@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<!--
+  index.html — the chat window.
+
+  Deliberately plain: one file, no build step, no framework. Most of the
+  interesting work happens in main.py.
+
+  The one thing worth understanding here is the `conversation` array in the
+  script below. That array IS the memory of this chat. The model remembers
+  nothing between requests, and neither does the server — so refreshing this
+  page loses the conversation.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Northwind Support</title>
+<style>
+  :root {
+    --bg: #ffffff; --panel: #f6f7f9; --border: #e3e6ea;
+    --text: #1a1d21; --muted: #6b7280;
+    --user: #2563eb; --user-text: #ffffff;
+    --accent: #2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181c; --panel: #1e2126; --border: #2c3036;
+      --text: #e6e8ea; --muted: #9aa1ab;
+      --user: #3b82f6; --user-text: #ffffff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; height: 100vh;
+  }
+  header {
+    padding: 14px 16px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header span { color: var(--muted); font-size: 13px; }
+
+  #chat { flex: 1; overflow-y: auto; padding: 16px; }
+  .wrap { max-width: 760px; margin: 0 auto; }
+
+  .msg { margin-bottom: 14px; display: flex; }
+  .msg.user { justify-content: flex-end; }
+  .bubble {
+    padding: 10px 14px; border-radius: 14px; max-width: 78%;
+    white-space: pre-wrap; word-wrap: break-word;
+  }
+  .user .bubble { background: var(--user); color: var(--user-text); border-bottom-right-radius: 4px; }
+  .assistant .bubble { background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+
+  .meta { font-size: 11px; color: var(--muted); margin-top: 5px; }
+  .empty { color: var(--muted); text-align: center; padding: 40px 16px; }
+  .empty code { background: var(--panel); padding: 2px 6px; border-radius: 4px; }
+
+  footer { border-top: 1px solid var(--border); padding: 12px 16px; }
+  form { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; }
+  input {
+    flex: 1; padding: 11px 14px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--text);
+    font: inherit; outline: none;
+  }
+  input:focus { border-color: var(--accent); }
+  button {
+    padding: 11px 20px; border-radius: 10px; border: none;
+    background: var(--accent); color: #fff; font: inherit; font-weight: 500;
+    cursor: pointer;
+  }
+  button:disabled { opacity: .5; cursor: default; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Northwind Tools — Support</h1>
+  <span>Returns · Warranty · Shipping · Price matching</span>
+</header>
+
+<div id="chat">
+  <div class="wrap" id="messages">
+    <div class="empty" id="empty">
+      Ask about returns, warranties, shipping or price matching.<br>
+      Try: <code>What's the restocking fee on a used power tool?</code>
+    </div>
+  </div>
+</div>
+
+<footer>
+  <form id="form">
+    <input id="input" placeholder="Type your question…" autocomplete="off" autofocus>
+    <button id="send" type="submit">Send</button>
+  </form>
+</footer>
+
+<script>
+// ---------------------------------------------------------------------------
+// THE CONVERSATION
+// ---------------------------------------------------------------------------
+// This array is the entire memory of this chat.
+//
+// The model itself remembers nothing between messages — every call starts
+// from a blank slate. The only reason it can answer "what did I just ask?"
+// is that we send this whole array back every single time.
+//
+// It lives in the browser, so refreshing the page wipes it.
+const conversation = [];
+
+const messagesEl = document.getElementById("messages");
+const emptyEl    = document.getElementById("empty");
+const formEl     = document.getElementById("form");
+const inputEl    = document.getElementById("input");
+const sendEl     = document.getElementById("send");
+
+// Draw one message bubble on screen.
+// `meta` is the small grey line underneath — we use it for token counts.
+function addBubble(role, text, meta) {
+  if (emptyEl) emptyEl.remove();            // clear the placeholder once
+
+  const row = document.createElement("div");
+  row.className = "msg " + role;
+
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;                // textContent, not innerHTML —
+  row.appendChild(bubble);                  // so typed text can't inject HTML
+
+  if (meta) {
+    const m = document.createElement("div");
+    m.className = "meta";
+    m.textContent = meta;
+    bubble.appendChild(m);
+  }
+
+  messagesEl.appendChild(row);
+  // Scroll to the newest message.
+  document.getElementById("chat").scrollTop = 1e9;
+  return bubble;
+}
+
+formEl.addEventListener("submit", async (event) => {
+  event.preventDefault();                   // don't let the browser reload
+
+  const text = inputEl.value.trim();
+  if (!text) return;
+
+  // Show what the user typed, and remember it.
+  addBubble("user", text);
+  conversation.push({ role: "user", content: text });
+
+  // Lock the form while we wait. Without this you can fire off five
+  // requests by mashing Enter, and the replies come back out of order.
+  inputEl.value = "";
+  inputEl.disabled = true;
+  sendEl.disabled = true;
+
+  // A placeholder bubble so the user knows something is happening.
+  // It sits there until the complete reply arrives, since the server sends
+  // the answer in one piece rather than a word at a time.
+  const pending = addBubble("assistant", "…");
+
+  try {
+    const res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      // Send the WHOLE conversation, not just the new message.
+      body: JSON.stringify({ messages: conversation }),
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `Server returned ${res.status}`);
+    }
+
+    const data = await res.json();
+
+    // Swap the placeholder for the real reply.
+    pending.textContent = data.reply;
+
+    // Show the token counts. "in" grows with every exchange, because the
+    // whole conversation is resent each time.
+    const u = data.usage;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    meta.textContent = `${u.prompt_tokens} in · ${u.completion_tokens} out`;
+    pending.appendChild(meta);
+
+    // Remember the reply, so the model can refer back to it next time.
+    conversation.push({ role: "assistant", content: data.reply });
+
+  } catch (error) {
+    pending.textContent = "⚠️ " + error.message;
+  } finally {
+    // Always re-enable the form, even if the request blew up.
+    inputEl.disabled = false;
+    sendEl.disabled = false;
+    inputEl.focus();
+  }
+});
+</script>
+</body>
+</html>

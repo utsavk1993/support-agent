@@ -1,0 +1,39 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly re-scan. Existing code can become vulnerable without changing,
+    # when a new class of vulnerability is discovered after it was written.
+    # Off-peak and off the hour, to avoid the crowd every cron job joins.
+    - cron: "23 4 * * 2"
+
+jobs:
+  analyze:
+    name: Analyze Python
+    runs-on: ubuntu-latest
+
+    permissions:
+      actions: read
+      contents: read
+      security-events: write   # needed to upload results to the Security tab
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Initialise CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: python
+          # Python is interpreted, so there is nothing to build — CodeQL
+          # reads the source directly. Compiled languages need a build step
+          # here so it can watch the compiler.
+          #
+          # To widen coverage beyond security defaults, add:
+          #   queries: security-extended,security-and-quality
+
+      - name: Analyse
+        uses: github/codeql-action/analyze@v3
