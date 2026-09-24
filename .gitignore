@@ -1,0 +1,15 @@
+# Secrets — never commit real keys
+.env
+
+# Python virtual environment
+.venv/
+venv/
+
+# Python bytecode cache
+__pycache__/
+*.pyc
+
+# Editor / OS noise
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,19 @@
+[tool.ruff]
+line-length = 140
+target-version = "py311"
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes — undefined names, unused imports
+    "I",    # import sorting
+    "UP",   # outdated syntax
+    "B",    # likely bugs
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Put the project root on the import path, so tests can `import main`.
+# Without this, a bare `pytest` fails while `python -m pytest` succeeds —
+# the latter silently adds the working directory and the former does not.
+pythonpath = ["."]
