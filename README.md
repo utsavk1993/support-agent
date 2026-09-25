@@ -119,15 +119,21 @@ would fail identically.
 
 ```bash
 pip install -r requirements-dev.txt
-docker compose up -d        # tests need the database
 ruff check .
 pytest -q
 ```
 
 Tests stub the model call, so they need no API key, make no network requests
 and cost nothing. They do use a real Postgres rather than a stand-in, since
-that is the only way to catch what differs between databases. CI starts its
-own and runs lint, tests and a startup check on every pull request.
+that is the only way to catch what differs between databases.
+
+They run against `<your database>_test`, created automatically on first run.
+The suite drops tables to prove the migrations work and empties them between
+tests, so it must never be pointed at a database you are developing against —
+the `_test` suffix is applied unconditionally for that reason.
+
+CI starts its own Postgres and runs lint, tests and a startup check on every
+pull request.
 
 ## Known limitations
 

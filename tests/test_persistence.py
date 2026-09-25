@@ -212,3 +212,29 @@ def test_the_model_is_never_sent_token_counts(visitor, monkeypatch):
 
     for message in captured["messages"]:
         assert set(message) == {"role", "content"}, f"extra keys sent to the model: {message}"
+
+
+def test_a_stale_conversation_id_does_not_wedge_the_chat(visitor):
+    """A conversation can vanish — deleted, or the cookie changed.
+
+    The browser recovers by forgetting the id and starting a new
+    conversation. Before this, every later message returned 404 and the
+    chat was stuck showing "Not found." for good.
+    """
+    conversation_id = conversation_id_of(send(visitor, "first question"))
+
+    # The conversation disappears from under the browser.
+    db("DELETE FROM conversations WHERE id = $1::uuid", conversation_id)
+
+    # The stale id is refused, which is what the client reacts to...
+    assert send(visitor, "next question", conversation_id).status_code == 404
+
+    # ...by sending it again without one, which must work.
+    retry = send(visitor, "next question")
+    assert retry.status_code == 200
+
+    new_id = conversation_id_of(retry)
+    assert new_id != conversation_id
+
+    messages = visitor.get(f"/api/conversations/{new_id}").json()["messages"]
+    assert messages[0]["content"] == "next question"
