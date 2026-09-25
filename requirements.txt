@@ -2,3 +2,5 @@ fastapi>=0.115
 uvicorn>=0.30
 openai>=1.50
 python-dotenv>=1.0
+asyncpg>=0.29
+itsdangerous>=2.2

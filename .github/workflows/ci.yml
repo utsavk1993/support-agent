@@ -17,6 +17,29 @@ jobs:
       # real API call — the model is stubbed out — so a placeholder is enough
       # and no real secret is needed.
       NVIDIA_API_KEY: dummy-key-not-used-in-tests
+      # Points at the service container below, not a hosted database.
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/support_test
+      SECRET_KEY: not-a-real-secret-only-signs-test-cookies
+
+    services:
+      # A real Postgres, started by GitHub for the life of this job and
+      # thrown away afterwards. Tests run against the same database engine
+      # as production rather than a stand-in, which is the only way to catch
+      # the things that differ between them.
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: support_test
+        ports:
+          - 5432:5432
+        # Without this, the job races a database that is still starting.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
 
     steps:
       - uses: actions/checkout@v4

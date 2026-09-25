@@ -1,8 +1,8 @@
-"""Smoke tests — no API key, no network, no cost.
+"""Smoke tests — no API key, no network, no model calls.
 
-The model call is replaced with a stub, so these check OUR code: that the
-app wires together, that bad input is rejected, and that the policy still
-contains the facts the assistant is supposed to quote.
+The model is stubbed in conftest.py, so these check OUR code: that the app
+wires together, that bad input is rejected, that the streaming contract
+holds, and that the policy still contains the facts the assistant quotes.
 """
 
 import asyncio
@@ -12,73 +12,35 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from fastapi.testclient import TestClient
+from conftest import fake_stream
 from pydantic import ValidationError
 
 import llm
 import main
+import store
 from prompts import SUPPORT_POLICY
 
 
-def fake_response(reply="A used power tool carries a 15% restocking fee.",
-                  prompt_tokens=100, completion_tokens=20):
-    """Stand in for a model reply, shaped like the real response object.
-
-    SimpleNamespace turns keyword arguments into attributes, so this reads
-    the same way the real thing does: response.choices[0].message.content.
-    """
-    return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=reply))],
-        usage=SimpleNamespace(
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            total_tokens=prompt_tokens + completion_tokens,
-        ),
-    )
-
-
-async def fake_stream(pieces=None, fail_after=None):
-    """Stand in for llm.stream — yields the pieces a real stream would.
-
-    `fail_after` makes it break partway through, so we can check what the
-    client sees when a reply dies after it has already started.
-    """
-    if pieces is None:
-        pieces = [
-            {"type": "thinking", "text": "Customer asks about "},
-            {"type": "thinking", "text": "returning a used tool."},
-            {"type": "text", "text": "A used power tool "},
-            {"type": "text", "text": "carries a 15% "},
-            {"type": "text", "text": "restocking fee."},
-            {"type": "usage", "prompt_tokens": 100,
-             "completion_tokens": 20, "total_tokens": 120,
-             "thinking_tokens": 12, "answer_tokens": 8,
-             "split_is_estimated": True},
-        ]
-    for index, piece in enumerate(pieces):
-        if fail_after is not None and index == fail_after:
-            raise RuntimeError("provider went away mid-reply")
-        yield piece
+def send(client, message="restocking fee?", conversation_id=None):
+    """POST one message, the way the browser does."""
+    body = {"message": message}
+    if conversation_id:
+        body["conversation_id"] = conversation_id
+    return client.post("/api/chat", json=body)
 
 
 def read_events(response):
     """Pull the JSON objects out of a Server-Sent Events response body."""
-    events = []
-    for block in response.text.split("\n\n"):
-        if block.startswith("data: "):
-            events.append(json.loads(block[6:]))
-    return events
+    return [
+        json.loads(block[6:])
+        for block in response.text.split("\n\n")
+        if block.startswith("data: ")
+    ]
 
 
-@pytest.fixture
-def client(monkeypatch):
-    """A test client whose model call is stubbed out.
-
-    The stub is `async def` because the handler awaits it. A plain function
-    here fails with "can't be used in 'await' expression".
-    """
-    monkeypatch.setattr(llm, "stream", lambda **kwargs: fake_stream())
-    return TestClient(main.app)
+def reply_events(response):
+    """Everything except the conversation announcement."""
+    return [e for e in read_events(response) if e["type"] != "conversation"]
 
 
 def test_page_is_served(client):
@@ -89,14 +51,11 @@ def test_page_is_served(client):
 
 def test_reply_arrives_in_pieces(client):
     """The point of streaming: several text events, not one block."""
-    response = client.post("/api/chat", json={
-        "messages": [{"role": "user", "content": "restocking fee?"}]
-    })
+    response = send(client)
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
 
-    events = read_events(response)
-    texts = [e for e in events if e["type"] == "text"]
+    texts = [e for e in reply_events(response) if e["type"] == "text"]
 
     assert len(texts) > 1, "a single event means it is not really streaming"
     assert "".join(t["text"] for t in texts) == (
@@ -106,12 +65,8 @@ def test_reply_arrives_in_pieces(client):
 
 def test_usage_arrives_last(client):
     """Token counts are not in the pieces; they come in a final event."""
-    response = client.post("/api/chat", json={
-        "messages": [{"role": "user", "content": "restocking fee?"}]
-    })
-    events = read_events(response)
-
-    usage = events[-1]
+    response = send(client)
+    usage = reply_events(response)[-1]
     assert usage["type"] == "usage"
     assert usage["prompt_tokens"] == 100
     assert usage["completion_tokens"] == 20
@@ -131,9 +86,7 @@ def test_failure_before_the_reply_starts_is_a_normal_http_error(client, monkeypa
 
     monkeypatch.setattr(llm, "stream", lambda **kwargs: refuses_to_start())
 
-    response = client.post("/api/chat", json={
-        "messages": [{"role": "user", "content": "hi"}]
-    })
+    response = send(client, "hi")
     assert response.status_code == 502
     assert "provider" not in response.text.lower(), "internal detail leaked"
 
@@ -142,12 +95,10 @@ def test_failure_midway_arrives_inside_the_stream(client, monkeypatch):
     """Too late for a status code, so the error has to travel as an event."""
     monkeypatch.setattr(llm, "stream", lambda **kwargs: fake_stream(fail_after=2))
 
-    response = client.post("/api/chat", json={
-        "messages": [{"role": "user", "content": "hi"}]
-    })
+    response = send(client, "hi")
     assert response.status_code == 200, "the stream already committed to 200"
 
-    events = read_events(response)
+    events = reply_events(response)
     assert [e["type"] for e in events] == ["thinking", "thinking", "error"]
     assert "went away" not in events[-1]["message"], "internal detail leaked"
 
@@ -161,7 +112,7 @@ def test_policy_is_sent_as_the_first_message(client, monkeypatch):
         return fake_stream()
 
     monkeypatch.setattr(llm, "stream", capture)
-    client.post("/api/chat", json={"messages": [{"role": "user", "content": "hi"}]})
+    send(client, "hi")
 
     first = captured["messages"][0]
     assert first["role"] == "system"
@@ -169,18 +120,18 @@ def test_policy_is_sent_as_the_first_message(client, monkeypatch):
 
 
 @pytest.mark.parametrize("bad_body", [
-    {"messages": []},                                # empty conversation
-    {"messages": [{"role": "user"}]},                # missing content
-    {"messages": [{"role": "user", "content": 1}]},  # content not a string
-    {"nonsense": True},                              # wrong shape entirely
+    {"message": ""},              # empty message
+    {"message": 1},               # not a string
+    {"message": "x" * 5000},      # beyond the length cap
+    {"nonsense": True},           # wrong shape entirely
 ])
 def test_malformed_requests_are_rejected(client, bad_body):
     assert client.post("/api/chat", json=bad_body).status_code == 422
 
 
-def test_message_model_requires_both_fields():
+def test_chat_request_requires_a_message():
     with pytest.raises(ValidationError):
-        main.Message(role="user")
+        main.ChatRequest(conversation_id="abc")
 
 
 @pytest.mark.parametrize("fact", [
@@ -194,7 +145,7 @@ def test_policy_contains_key_facts(fact):
     assert fact in SUPPORT_POLICY
 
 
-def test_requests_are_handled_concurrently(monkeypatch):
+def test_requests_are_handled_concurrently(monkeypatch, clean_db):
     """Requests should overlap, not queue up behind one another.
 
     This is the regression test for the blocking request path. With a sync
@@ -212,14 +163,20 @@ def test_requests_are_handled_concurrently(monkeypatch):
     monkeypatch.setattr(llm, "stream", lambda **kwargs: slow_stream())
 
     async def fire_all_at_once():
-        transport = httpx.ASGITransport(app=main.app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://test") as sender:
-            body = {"messages": [{"role": "user", "content": "hi"}]}
-            started = time.perf_counter()
-            responses = await asyncio.gather(
-                *[sender.post("/api/chat", json=body) for _ in range(requests)]
-            )
-            return time.perf_counter() - started, responses
+        # httpx does not run FastAPI's startup, so the pool is opened by hand
+        # here — on this loop, which is the one the requests will use.
+        await store.connect()
+        try:
+            transport = httpx.ASGITransport(app=main.app)
+            async with httpx.AsyncClient(transport=transport, base_url="http://test") as sender:
+                body = {"message": "hi"}
+                started = time.perf_counter()
+                responses = await asyncio.gather(
+                    *[sender.post("/api/chat", json=body) for _ in range(requests)]
+                )
+                return time.perf_counter() - started, responses
+        finally:
+            await store.disconnect()
 
     elapsed, responses = asyncio.run(fire_all_at_once())
 
@@ -236,10 +193,8 @@ def test_reasoning_is_labelled_separately_from_the_reply(client):
     The client folds reasoning away behind a toggle. That only works if the
     two never get mixed into the same event type.
     """
-    response = client.post("/api/chat", json={
-        "messages": [{"role": "user", "content": "hi"}]
-    })
-    events = read_events(response)
+    response = send(client, "hi")
+    events = reply_events(response)
 
     kinds = [e["type"] for e in events]
     assert "thinking" in kinds
