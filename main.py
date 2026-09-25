@@ -112,7 +112,9 @@ async def load_conversation(conversation_id: str, request: Request):
 
     return {
         "conversation_id": conversation_id,
-        "messages": await store.load_messages(conversation_id, owner),
+        # load_transcript, not load_messages: the browser wants token
+        # counts, which the model must never be sent.
+        "messages": await store.load_transcript(conversation_id, owner),
     }
 
 

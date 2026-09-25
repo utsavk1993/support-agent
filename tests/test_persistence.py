@@ -174,3 +174,41 @@ def test_migrations_run_once_and_are_recorded(visitor):
     applied = [r["filename"] for r in db("SELECT filename FROM schema_migrations")]
     assert "001_conversations.sql" in applied
     assert len(applied) == len(set(applied)), "a migration was applied twice"
+
+
+def test_token_counts_come_back_after_a_refresh(visitor):
+    """They were stored; a restored conversation should show them too."""
+    conversation_id = conversation_id_of(send(visitor, "restocking fee?"))
+
+    messages = visitor.get(f"/api/conversations/{conversation_id}").json()["messages"]
+
+    user_message, assistant_message = messages
+    assert "usage" not in user_message, "a question costs nothing on its own"
+
+    usage = assistant_message["usage"]
+    assert usage["prompt_tokens"] == 684
+    assert usage["thinking_tokens"] == 40
+    assert usage["answer_tokens"] == 60
+    assert usage["total_tokens"] == 784
+
+
+def test_the_model_is_never_sent_token_counts(visitor, monkeypatch):
+    """The transcript carries usage for the browser; the prompt must not.
+
+    load_messages and load_transcript exist separately for this reason. Any
+    extra key in the messages handed to the model would be sent to the
+    provider along with the conversation.
+    """
+    conversation_id = conversation_id_of(send(visitor, "first question"))
+
+    captured = {}
+
+    def capture(**kwargs):
+        captured.update(kwargs)
+        return fake_stream()
+
+    monkeypatch.setattr(llm, "stream", capture)
+    send(visitor, "second question", conversation_id)
+
+    for message in captured["messages"]:
+        assert set(message) == {"role", "content"}, f"extra keys sent to the model: {message}"

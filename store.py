@@ -155,6 +155,46 @@ async def load_messages(conversation_id: str, owner_id: str) -> list[dict]:
     return [{"role": row["role"], "content": row["content"]} for row in rows]
 
 
+async def load_transcript(conversation_id: str, owner_id: str) -> list[dict]:
+    """The conversation as the BROWSER needs it: text plus token counts.
+
+    Deliberately separate from load_messages above. That one feeds the
+    model, and any extra key in those dictionaries would be sent to the
+    provider along with the conversation. Keeping the two apart means a
+    display-only field cannot end up in a prompt by accident.
+    """
+    rows = await pool().fetch(
+        """
+        SELECT m.role, m.content,
+               m.prompt_tokens, m.completion_tokens,
+               m.thinking_tokens, m.answer_tokens
+        FROM messages m
+        JOIN conversations c ON c.id = m.conversation_id
+        WHERE m.conversation_id = $1 AND c.owner_id = $2
+        ORDER BY m.id
+        """,
+        conversation_id, owner_id,
+    )
+
+    transcript = []
+    for row in rows:
+        message = {"role": row["role"], "content": row["content"]}
+
+        # Only assistant messages have token counts; user messages cost
+        # nothing on their own.
+        if row["prompt_tokens"] is not None:
+            message["usage"] = {
+                "prompt_tokens": row["prompt_tokens"],
+                "completion_tokens": row["completion_tokens"],
+                "thinking_tokens": row["thinking_tokens"],
+                "answer_tokens": row["answer_tokens"],
+                "total_tokens": row["prompt_tokens"] + row["completion_tokens"],
+            }
+        transcript.append(message)
+
+    return transcript
+
+
 async def add_message(
     conversation_id: str,
     role: str,
