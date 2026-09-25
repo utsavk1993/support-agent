@@ -161,14 +161,14 @@
 // ---------------------------------------------------------------------------
 // THE CONVERSATION
 // ---------------------------------------------------------------------------
-// This array is the entire memory of this chat.
+// The messages themselves live on the server now. All the browser keeps is
+// the id of the conversation it is in, so it can say which one to continue
+// after a refresh.
 //
-// The model itself remembers nothing between messages — every call starts
-// from a blank slate. The only reason it can answer "what did I just ask?"
-// is that we send this whole array back every single time.
-//
-// It lives in the browser, so refreshing the page wipes it.
-const conversation = [];
+// The model still remembers nothing between messages — the server reloads
+// the history from the database and sends it every time. What changed is
+// who holds that history, not whether it gets sent.
+let conversationId = localStorage.getItem("conversationId");
 
 const messagesEl = document.getElementById("messages");
 const emptyEl    = document.getElementById("empty");
@@ -222,15 +222,54 @@ function renderMarkdown(markdown) {
   return DOMPurify.sanitize(marked.parse(markdown));
 }
 
+// ---------------------------------------------------------------------------
+// RESTORE ON LOAD
+// ---------------------------------------------------------------------------
+// If we were in a conversation last time, fetch it and draw it again. This
+// is the whole point of moving history to the server: closing the tab no
+// longer destroys it.
+async function restoreConversation() {
+  if (!conversationId) return;
+
+  try {
+    const res = await fetch(`/api/conversations/${conversationId}`);
+
+    if (!res.ok) {
+      // 404 means it is gone, or belongs to someone else — which is what
+      // you get after clearing cookies, since identity lives in one.
+      // Either way, forget it and start fresh rather than retrying forever.
+      localStorage.removeItem("conversationId");
+      conversationId = null;
+      return;
+    }
+
+    const data = await res.json();
+    for (const message of data.messages) {
+      const { body } = addBubble(message.role, "");
+      // Assistant replies are markdown; what the customer typed is not, and
+      // must never be treated as markup.
+      if (message.role === "assistant") {
+        body.innerHTML = renderMarkdown(message.content);
+      } else {
+        body.textContent = message.content;
+      }
+    }
+  } catch {
+    // Offline, or the server is down. Leave the page empty rather than
+    // showing an error for something the user did not ask for.
+  }
+}
+
+restoreConversation();
+
 formEl.addEventListener("submit", async (event) => {
   event.preventDefault();                   // don't let the browser reload
 
   const text = inputEl.value.trim();
   if (!text) return;
 
-  // Show what the user typed, and remember it.
+  // Show what the user typed. The server records it; we only draw it.
   addBubble("user", text);
-  conversation.push({ role: "user", content: text });
 
   // Lock the form while we wait. Without this you can fire off five
   // requests by mashing Enter, and the replies come back out of order.
@@ -271,8 +310,9 @@ formEl.addEventListener("submit", async (event) => {
     const res = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      // Send the WHOLE conversation, not just the new message.
-      body: JSON.stringify({ messages: conversation }),
+      // One message, plus which conversation it belongs to. The server
+      // loads the rest — the browser no longer sends the history at all.
+      body: JSON.stringify({ message: text, conversation_id: conversationId }),
     });
 
     // Failures that happen BEFORE the reply starts still arrive as a normal
@@ -308,7 +348,13 @@ formEl.addEventListener("submit", async (event) => {
         if (!event.startsWith("data: ")) continue;
         const piece = JSON.parse(event.slice(6));
 
-        if (piece.type === "thinking") {
+        if (piece.type === "conversation") {
+          // Arrives first. On a new conversation this is the id the server
+          // just created, which we keep so a refresh can pick it back up.
+          conversationId = piece.id;
+          localStorage.setItem("conversationId", conversationId);
+
+        } else if (piece.type === "thinking") {
           // The model working out what to say, before it says any of it.
           showThinking(piece.text);
 
@@ -351,9 +397,6 @@ formEl.addEventListener("submit", async (event) => {
         }
       }
     }
-
-    // Remember the reply, so the model can refer back to it next time.
-    conversation.push({ role: "assistant", content: reply });
 
   } catch (error) {
     finishThinking();

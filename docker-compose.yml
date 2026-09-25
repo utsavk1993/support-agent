@@ -1,0 +1,33 @@
+# Postgres for local development.
+#
+#   docker compose up -d      start it
+#   docker compose down       stop it, keeping the data
+#   docker compose down -v    stop it and wipe the data
+#
+# CI does not use this file — GitHub Actions starts its own Postgres as a
+# service container. Production uses a hosted database. All three are the
+# same Postgres behind the same connection string, so only the string changes.
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: northwind
+      POSTGRES_PASSWORD: local-development-only
+      POSTGRES_DB: support
+    ports:
+      # Host port 5433, not the usual 5432, so this cannot collide with a
+      # Postgres you already have running for something else.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # Compose waits for this before reporting the service as ready, so
+      # scripts do not race a database that is still starting up.
+      test: ["CMD-SHELL", "pg_isready -U northwind -d support"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:
