@@ -15,6 +15,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Northwind Support</title>
+
+<!--
+  marked      turns the model's markdown (**bold**, lists) into HTML.
+  DOMPurify   strips anything dangerous from that HTML before we insert it.
+
+  DOMPurify is not optional. The model's reply is not trusted input: a
+  customer can write anything into the chat, and the model can be talked
+  into repeating it. If that reached innerHTML unchecked, a message
+  containing <img src=x onerror="..."> would run their script in our page.
+  DOMPurify removes that while leaving normal formatting alone.
+
+  Never write your own HTML sanitiser. This is a problem with a very long
+  tail of edge cases, and a well-tested library is the only sane answer.
+-->
+<script src="https://cdn.jsdelivr.net/npm/marked@14.1.3/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.7/dist/purify.min.js"></script>
 <style>
   :root {
     --bg: #ffffff; --panel: #f6f7f9; --border: #e3e6ea;
@@ -49,12 +65,56 @@
   .msg.user { justify-content: flex-end; }
   .bubble {
     padding: 10px 14px; border-radius: 14px; max-width: 78%;
-    white-space: pre-wrap; word-wrap: break-word;
+    word-wrap: break-word;
   }
+  /* The customer's own message is plain text, so their line breaks have to
+     survive. The assistant's reply is HTML, where newlines between tags are
+     just formatting — leaving pre-wrap on would render every one of them as
+     a blank line, which is what made replies look so airy. */
+  .user .body { white-space: pre-wrap; }
   .user .bubble { background: var(--user); color: var(--user-text); border-bottom-right-radius: 4px; }
   .assistant .bubble { background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
 
   .meta { font-size: 11px; color: var(--muted); margin-top: 5px; }
+
+  /* The model's formatted reply. Margins are trimmed so a single
+     paragraph does not sit in a pool of empty space. */
+  .body > *:first-child { margin-top: 0; }
+  .body > *:last-child { margin-bottom: 0; }
+  .body p { margin: 0 0 8px; }
+  .body ul, .body ol { margin: 0 0 8px; padding-left: 22px; }
+  .body li { margin: 0; }
+  /* The model leaves blank lines between bullets, which markdown treats as
+     a "loose" list and wraps each item in its own paragraph. Those carry a
+     bottom margin that stacks with the list spacing, so we flatten them. */
+  .body li > p { margin: 0; }
+  .body li + li { margin-top: 5px; }
+  .body li > ul, .body li > ol { margin: 4px 0 0; }
+  .body code { background: rgba(127,127,127,.18); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+  .body pre { background: rgba(127,127,127,.14); padding: 10px; border-radius: 8px; overflow-x: auto; }
+  .body pre code { background: none; padding: 0; }
+  .body h1, .body h2, .body h3 { font-size: 15px; margin: 10px 0 6px; }
+  .body table { border-collapse: collapse; margin: 4px 0 8px; }
+  .body th, .body td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+
+  /* The model's reasoning, folded away by default. */
+  details.thinking { margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+  details.thinking summary {
+    cursor: pointer; user-select: none; list-style: none;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 9px; border-radius: 999px;
+    background: rgba(127,127,127,.14);
+  }
+  details.thinking summary::-webkit-details-marker { display: none; }
+  details.thinking[open] summary { margin-bottom: 6px; }
+  .thinking-body {
+    white-space: pre-wrap; padding: 8px 11px; border-radius: 8px;
+    background: rgba(127,127,127,.09); border-left: 2px solid var(--border);
+    max-height: 220px; overflow-y: auto; line-height: 1.5;
+  }
+  /* A gentle pulse while the model is still working. */
+  .pulse { animation: pulse 1.3s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .45 } }
   .empty { color: var(--muted); text-align: center; padding: 40px 16px; }
   .empty code { background: var(--panel); padding: 2px 6px; border-radius: 4px; }
 
@@ -118,7 +178,17 @@ const sendEl     = document.getElementById("send");
 
 // Draw one message bubble on screen.
 // `meta` is the small grey line underneath — we use it for token counts.
-function addBubble(role, text, meta) {
+// Draw one message bubble.
+//
+// The bubble is split into three parts, because each holds a different kind
+// of content and they arrive at different times:
+//
+//   thinking  the model's reasoning, folded away  (assistant only)
+//   body      the reply itself
+//   meta      the token counts, once it finishes
+//
+// Keeping them separate means writing the reply does not wipe out the rest.
+function addBubble(role, text) {
   if (emptyEl) emptyEl.remove();            // clear the placeholder once
 
   const row = document.createElement("div");
@@ -126,20 +196,30 @@ function addBubble(role, text, meta) {
 
   const bubble = document.createElement("div");
   bubble.className = "bubble";
-  bubble.textContent = text;                // textContent, not innerHTML —
-  row.appendChild(bubble);                  // so typed text can't inject HTML
 
-  if (meta) {
-    const m = document.createElement("div");
-    m.className = "meta";
-    m.textContent = meta;
-    bubble.appendChild(m);
-  }
+  const body = document.createElement("div");
+  body.className = "body";
+  body.textContent = text;                  // textContent, not innerHTML —
+  bubble.appendChild(body);                 // so typed text can't inject HTML
 
+  row.appendChild(bubble);
   messagesEl.appendChild(row);
-  // Scroll to the newest message.
+  scrollDown();
+  return { bubble, body };
+}
+
+function scrollDown() {
   document.getElementById("chat").scrollTop = 1e9;
-  return bubble;
+}
+
+// Turn the model's markdown into HTML, safely.
+//
+// Two steps, and the second one is the important one. marked does the
+// formatting; DOMPurify throws away anything that could run code. Skipping
+// the purify step would mean any script the model can be persuaded to write
+// would execute in our page.
+function renderMarkdown(markdown) {
+  return DOMPurify.sanitize(marked.parse(markdown));
 }
 
 formEl.addEventListener("submit", async (event) => {
@@ -158,10 +238,34 @@ formEl.addEventListener("submit", async (event) => {
   inputEl.disabled = true;
   sendEl.disabled = true;
 
-  // A placeholder bubble so the user knows something is happening.
-  // It sits there until the complete reply arrives, since the server sends
-  // the answer in one piece rather than a word at a time.
-  const pending = addBubble("assistant", "…");
+  // An empty bubble to fill in as the reply arrives.
+  const { bubble, body } = addBubble("assistant", "");
+
+  // Built lazily, only if the model actually reasons before answering.
+  let thinkingBox = null;
+  let thinkingText = "";
+  const startedAt = performance.now();
+
+  function showThinking(chunk) {
+    if (!thinkingBox) {
+      thinkingBox = document.createElement("details");
+      thinkingBox.className = "thinking";
+      thinkingBox.innerHTML =
+        '<summary class="pulse">Thinking…</summary><div class="thinking-body"></div>';
+      bubble.insertBefore(thinkingBox, body);   // above the reply
+    }
+    thinkingText += chunk;
+    thinkingBox.querySelector(".thinking-body").textContent = thinkingText;
+    scrollDown();
+  }
+
+  function finishThinking() {
+    if (!thinkingBox) return;
+    const seconds = ((performance.now() - startedAt) / 1000).toFixed(1);
+    const summary = thinkingBox.querySelector("summary");
+    summary.textContent = `Thought for ${seconds}s`;
+    summary.classList.remove("pulse");         // stop the animation
+  }
 
   try {
     const res = await fetch("/api/chat", {
@@ -171,29 +275,89 @@ formEl.addEventListener("submit", async (event) => {
       body: JSON.stringify({ messages: conversation }),
     });
 
+    // Failures that happen BEFORE the reply starts still arrive as a normal
+    // HTTP error, so we can handle them the usual way.
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || `Server returned ${res.status}`);
     }
 
-    const data = await res.json();
+    // ---- reading the stream -------------------------------------------
+    // The server sends Server-Sent Events: each one is a line beginning
+    // "data: " followed by a blank line. They arrive in whatever sized
+    // lumps the network feels like, so a single read might contain two
+    // events, or half of one. We keep a buffer and only process what is
+    // complete.
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let reply = "";
 
-    // Swap the placeholder for the real reply.
-    pending.textContent = data.reply;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    // Show the token counts. "in" grows with every exchange, because the
-    // whole conversation is resent each time.
-    const u = data.usage;
-    const meta = document.createElement("div");
-    meta.className = "meta";
-    meta.textContent = `${u.prompt_tokens} in · ${u.completion_tokens} out`;
-    pending.appendChild(meta);
+      buffer += decoder.decode(value, { stream: true });
+
+      // A blank line marks the end of an event. Anything after the last
+      // one is a partial event — leave it in the buffer for the next read.
+      const events = buffer.split("\n\n");
+      buffer = events.pop();
+
+      for (const event of events) {
+        if (!event.startsWith("data: ")) continue;
+        const piece = JSON.parse(event.slice(6));
+
+        if (piece.type === "thinking") {
+          // The model working out what to say, before it says any of it.
+          showThinking(piece.text);
+
+        } else if (piece.type === "text") {
+          // First real text means the reasoning is over.
+          if (!reply) finishThinking();
+
+          reply += piece.text;
+          // Re-render the whole reply each time rather than appending.
+          // Markdown needs the full text to make sense of it — half of
+          // "**bold**" is not bold, it is two asterisks.
+          body.innerHTML = renderMarkdown(reply);
+          scrollDown();
+
+        } else if (piece.type === "usage") {
+          // Token counts arrive once, at the very end.
+          finishThinking();
+          const meta = document.createElement("div");
+          meta.className = "meta";
+          // The provider bills one figure for everything the model wrote,
+          // reasoning included, so the thinking share is worked out from how
+          // much of the output was reasoning. The ~ marks it as an estimate.
+          meta.textContent =
+            `${piece.prompt_tokens} in` +
+            ` + ~${piece.thinking_tokens} thinking` +
+            ` + ~${piece.answer_tokens} answer` +
+            ` = ${piece.total_tokens} total`;
+          meta.title =
+            `Billed: ${piece.prompt_tokens} input + ${piece.completion_tokens} output.\n` +
+            `The provider does not separate reasoning from the answer, so that ` +
+            `split is estimated from the length of each.`;
+          bubble.appendChild(meta);
+
+        } else if (piece.type === "error") {
+          // Something broke after the reply had already started. We cannot
+          // get a status code at this point, so the server tells us here.
+          finishThinking();
+          reply += "\n\n⚠️ " + piece.message;
+          body.innerHTML = renderMarkdown(reply);
+        }
+      }
+    }
 
     // Remember the reply, so the model can refer back to it next time.
-    conversation.push({ role: "assistant", content: data.reply });
+    conversation.push({ role: "assistant", content: reply });
 
   } catch (error) {
-    pending.textContent = "⚠️ " + error.message;
+    finishThinking();
+    body.textContent = "⚠️ " + error.message;
   } finally {
     // Always re-enable the form, even if the request blew up.
     inputEl.disabled = false;

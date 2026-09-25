@@ -17,10 +17,14 @@ RUN IT WITH:
 Then open http://127.0.0.1:8000
 """
 
+import json
 from pathlib import Path  # Works out where index.html lives, no matter what folder you run the command from.
 
 from fastapi import FastAPI, HTTPException  # The web server itself, plus the way we send back an error.
-from fastapi.responses import FileResponse  # Hands the browser a file straight off disk, like index.html.
+from fastapi.responses import (  # Hands back a file from disk, or a reply sent in pieces.
+    FileResponse,
+    StreamingResponse,
+)
 from pydantic import BaseModel, Field  # Describes the shape of incoming JSON so FastAPI can check it for us.
 
 import llm  # Our own file — the only thing here that talks to the model.
@@ -86,79 +90,83 @@ async def serve_page():
 # ---------------------------------------------------------------------------
 @app.post("/api/chat")
 async def chat(request: ChatRequest):
-    """Take the conversation, ask the model, hand back its reply.
+    """Take the conversation, ask the model, and stream the reply back.
 
-    That `request: ChatRequest` part is doing real work. FastAPI reads the
-    incoming JSON, checks it matches the shape we defined above, and gives
-    us a proper Python object. Bad input never reaches this line.
+    Rather than waiting for the whole answer and sending it in one go, we
+    forward each piece the moment it arrives. The user sees words appear
+    instead of staring at a placeholder.
 
     `async def` matters here. A plain `def` handler gets one thread from a
     pool of 40 and holds it for the whole request, so the 41st person to
     arrive at once waits for someone else to finish. An `async def` handler
     holds no thread while it waits, so thousands can be in flight.
 
-    The rule that comes with it: nothing in here may block. Any slow call
-    must be awaited, or the whole server stops for everyone.
+    That matters more now than before: a streamed request keeps its
+    connection open for the whole reply, seconds rather than milliseconds.
     """
-
-    # Build what we actually send to the model.
-    #
-    # The policy goes FIRST, as a "system" message. Two reasons:
-    #   - It's instructions, not conversation. The model treats it as rules.
-    #   - It never changes, so keeping it at the front means the provider
-    #     can recognise it as a repeated prefix and charge less for it.
-    #
-    # Then the conversation so far, exactly as the browser sent it.
-    #
-    # We rebuild this list fresh on every request and throw it away
-    # afterwards. The server holds no conversation state.
+    # Build what we send. The policy goes FIRST, as a "system" message:
+    # it is instructions rather than conversation, and it never changes, so
+    # keeping it at the front lets the provider recognise a repeated prefix
+    # and charge less for it.
     model_messages = [{"role": "system", "content": SUPPORT_POLICY}]
     for message in request.messages:
         model_messages.append({"role": message.role, "content": message.content})
 
-    # Ask the model. llm.chat handles the retrying if the server has a wobble.
+    pieces = llm.stream(model=llm.MODEL, messages=model_messages, max_tokens=1024)
+
+    # Pull the FIRST piece before we answer the browser at all.
+    #
+    # This is the whole trick for keeping error handling sane. Once we start
+    # streaming, the browser has already been told "200 OK" and we can no
+    # longer change our mind about the status code. By fetching one piece
+    # up front, a provider failure still becomes a proper 502 — exactly as
+    # it did before streaming.
+    #
+    # `anext` runs the generator up to its first yield, which is where the
+    # request is actually made.
     try:
-        response = await llm.chat(
-            model=llm.MODEL,
-            messages=model_messages,
-            # The longest reply we'll allow. A safety belt: without it, a
-            # confused model could ramble for thousands of tokens and bill
-            # you for all of them.
-            max_tokens=1024,
-        )
+        first_piece = await anext(pieces, None)
     except Exception as error:
-        # Every retry failed, or something else broke.
-        #
-        # We deliberately do NOT send the raw error to the browser. It can
-        # contain internal details — URLs, keys, server names — that a
-        # customer should never see. We log the real thing for ourselves and
-        # send back something safe and vague.
+        # Nothing has been sent yet, so we can still fail properly.
+        # The real error goes to our logs; the customer gets something safe,
+        # since provider errors can name internal hosts and services.
         print(f"[chat failed] {type(error).__name__}: {error}")
         raise HTTPException(
             status_code=502,  # "the thing I depend on is broken"
             detail="The assistant is unavailable right now. Please try again.",
         ) from error
 
-    # Pull the reply text out of the response.
-    #
-    # `choices` is a list because the API can return several alternative
-    # answers if you ask for them. We only ever ask for one, so we take [0].
-    #
-    # `or ""` guards against content being empty — we'd rather send back an
-    # empty string than the word "None" appearing in the chat window.
-    reply_text = response.choices[0].message.content or ""
+    async def send_events():
+        """Yield the reply as Server-Sent Events.
 
-    # Send it back as JSON. FastAPI turns this dictionary into a JSON
-    # response automatically.
-    #
-    # The token counts go back too. They are what every cost decision is
-    # judged on, so it's worth having them visible rather than buried in
-    # a log somewhere.
-    return {
-        "reply": reply_text,
-        "usage": {
-            "prompt_tokens": response.usage.prompt_tokens,          # what we sent
-            "completion_tokens": response.usage.completion_tokens,  # what it wrote
-            "total_tokens": response.usage.total_tokens,
+        SSE is just a long-lived response with a simple text format: each
+        event is a line starting `data: `, followed by a blank line. We put
+        one JSON object on each line, so the browser can tell the difference
+        between text, token counts and errors.
+        """
+        try:
+            if first_piece is not None:
+                yield f"data: {json.dumps(first_piece)}\n\n"
+
+            async for piece in pieces:
+                yield f"data: {json.dumps(piece)}\n\n"
+
+        except Exception as error:
+            # We are past the point of no return: the browser already has
+            # part of the answer and a 200 status. The only way to report
+            # this is INSIDE the stream, and the client has to handle it.
+            print(f"[stream broke] {type(error).__name__}: {error}")
+            yield f"data: {json.dumps({'type': 'error', 'message': 'The reply was cut short. Please try again.'})}\n\n"
+
+    return StreamingResponse(
+        send_events(),
+        media_type="text/event-stream",
+        headers={
+            # Some proxies hold a response until it is complete, which turns
+            # streaming back into waiting. This asks them not to. It changes
+            # nothing locally, which is exactly why it is easy to forget
+            # until it breaks in production.
+            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache",
         },
-    }
+    )
