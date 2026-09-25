@@ -222,6 +222,26 @@ function renderMarkdown(markdown) {
   return DOMPurify.sanitize(marked.parse(markdown));
 }
 
+// The token line under a reply. Defined once so a restored conversation
+// shows exactly what it showed live, rather than drifting out of step.
+function addUsageLine(bubble, usage) {
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  // The provider bills one figure for everything the model wrote, reasoning
+  // included, so the thinking share is worked out from how much of the
+  // output was reasoning. The ~ marks it as an estimate.
+  meta.textContent =
+    `${usage.prompt_tokens} in` +
+    ` + ~${usage.thinking_tokens} thinking` +
+    ` + ~${usage.answer_tokens} answer` +
+    ` = ${usage.total_tokens} total`;
+  meta.title =
+    `Billed: ${usage.prompt_tokens} input + ${usage.completion_tokens} output.\n` +
+    `The provider does not separate reasoning from the answer, so that ` +
+    `split is estimated from the length of each.`;
+  bubble.appendChild(meta);
+}
+
 // ---------------------------------------------------------------------------
 // RESTORE ON LOAD
 // ---------------------------------------------------------------------------
@@ -245,7 +265,8 @@ async function restoreConversation() {
 
     const data = await res.json();
     for (const message of data.messages) {
-      const { body } = addBubble(message.role, "");
+      const { bubble, body } = addBubble(message.role, "");
+
       // Assistant replies are markdown; what the customer typed is not, and
       // must never be treated as markup.
       if (message.role === "assistant") {
@@ -253,6 +274,14 @@ async function restoreConversation() {
       } else {
         body.textContent = message.content;
       }
+
+      // Token counts were recorded when the reply was written, so they
+      // survive a refresh along with the text.
+      //
+      // The "Thought for Ns" toggle does not come back: the reasoning is
+      // the model's scratchpad and is not stored. It can speculate about a
+      // customer, and keeping it would be a liability rather than an asset.
+      if (message.usage) addUsageLine(bubble, message.usage);
     }
   } catch {
     // Offline, or the server is down. Leave the page empty rather than
@@ -372,21 +401,7 @@ formEl.addEventListener("submit", async (event) => {
         } else if (piece.type === "usage") {
           // Token counts arrive once, at the very end.
           finishThinking();
-          const meta = document.createElement("div");
-          meta.className = "meta";
-          // The provider bills one figure for everything the model wrote,
-          // reasoning included, so the thinking share is worked out from how
-          // much of the output was reasoning. The ~ marks it as an estimate.
-          meta.textContent =
-            `${piece.prompt_tokens} in` +
-            ` + ~${piece.thinking_tokens} thinking` +
-            ` + ~${piece.answer_tokens} answer` +
-            ` = ${piece.total_tokens} total`;
-          meta.title =
-            `Billed: ${piece.prompt_tokens} input + ${piece.completion_tokens} output.\n` +
-            `The provider does not separate reasoning from the answer, so that ` +
-            `split is estimated from the length of each.`;
-          bubble.appendChild(meta);
+          addUsageLine(bubble, piece);
 
         } else if (piece.type === "error") {
           // Something broke after the reply had already started. We cannot
