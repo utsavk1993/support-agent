@@ -25,25 +25,73 @@ They never share a connection, so the loops never collide.
 import asyncio
 import os
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 import pytest
 from dotenv import load_dotenv
 
-# Use the same settings the app uses, so tests talk to the database you are
-# actually developing against rather than a guess about where it lives.
+# Read the same settings the app uses, so tests find the database wherever
+# you actually run it, rather than guessing at a port.
 #
 # load_dotenv does not overwrite variables that are already set, so CI —
-# which provides its own DATABASE_URL and has no .env — is unaffected.
+# which supplies its own DATABASE_URL and has no .env — is unaffected.
 load_dotenv(Path(__file__).parent.parent / ".env")
 
 os.environ.setdefault(
     "DATABASE_URL",
     "postgresql://northwind:local-development-only@127.0.0.1:5433/support",
 )
+
+
+def _test_database_url(url: str) -> str:
+    """Point at <database>_test instead of <database>.
+
+    THE TESTS DESTROY WHATEVER DATABASE THEY ARE GIVEN. They drop the tables
+    to prove the migrations run, and empty them after each test. Run that
+    against the database you develop with and your own conversations vanish
+    mid-session, which is a confusing way to lose data.
+
+    So the name always gets a _test suffix. There is no configuration that
+    makes the suite run against a database called anything else.
+    """
+    parts = urlparse(url)
+    name = parts.path.lstrip("/")
+    if not name.endswith("_test"):
+        parts = parts._replace(path=f"/{name}_test")
+    return urlunparse(parts)
+
+
+def _ensure_test_database_exists(url: str) -> None:
+    """Create the test database on first run, so setup is one less step."""
+    parts = urlparse(url)
+    name = parts.path.lstrip("/")
+    # Connect to the always-present maintenance database to create ours.
+    admin_url = urlunparse(parts._replace(path="/postgres"))
+
+    async def create():
+        connection = await asyncpg.connect(admin_url)
+        try:
+            exists = await connection.fetchval(
+                "SELECT 1 FROM pg_database WHERE datname = $1", name
+            )
+            if not exists:
+                # CREATE DATABASE cannot run inside a transaction, and the
+                # name cannot be a bound parameter, hence the interpolation.
+                # The value comes from our own configuration, not user input.
+                await connection.execute(f'CREATE DATABASE "{name}"')
+                print(f"[tests] created database {name}")
+        finally:
+            await connection.close()
+
+    asyncio.run(create())
 os.environ.setdefault("NVIDIA_API_KEY", "dummy-key-not-used-in-tests")
 os.environ.setdefault("SECRET_KEY", "test-only-secret")
 
 import asyncpg  # noqa: E402
+
+os.environ["DATABASE_URL"] = _test_database_url(os.environ["DATABASE_URL"])
+_ensure_test_database_exists(os.environ["DATABASE_URL"])
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 import llm  # noqa: E402

@@ -336,13 +336,31 @@ formEl.addEventListener("submit", async (event) => {
   }
 
   try {
-    const res = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      // One message, plus which conversation it belongs to. The server
-      // loads the rest — the browser no longer sends the history at all.
-      body: JSON.stringify({ message: text, conversation_id: conversationId }),
-    });
+    // One message, plus which conversation it belongs to. The server loads
+    // the rest — the browser no longer sends the history at all.
+    async function post(id) {
+      return fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: text, conversation_id: id }),
+      });
+    }
+
+    let res = await post(conversationId);
+
+    // A 404 means the server does not recognise this conversation: it was
+    // deleted, or the session cookie changed and it now belongs to someone
+    // else. The id we are holding is useless.
+    //
+    // Without this, every later message failed the same way and the chat was
+    // stuck for good — the id stayed in localStorage and kept being sent.
+    // Forget it and send the message again as a new conversation, so the
+    // person can carry on rather than being told "Not found." forever.
+    if (res.status === 404 && conversationId) {
+      localStorage.removeItem("conversationId");
+      conversationId = null;
+      res = await post(null);
+    }
 
     // Failures that happen BEFORE the reply starts still arrive as a normal
     // HTTP error, so we can handle them the usual way.
