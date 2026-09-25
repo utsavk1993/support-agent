@@ -32,8 +32,26 @@ Open <http://127.0.0.1:8000>. An interactive API explorer is available at
 ## How it works
 
 A request carries the full conversation to `POST /api/chat`. The server
-prepends the support policy as a system message, sends everything to the
-model, and returns the reply along with token usage.
+prepends the support policy as a system message and streams the reply back
+as Server-Sent Events, forwarding each piece as the model writes it.
+
+Three kinds of event travel over that stream:
+
+| Event | When | Shown as |
+|---|---|---|
+| `thinking` | While the model reasons, before it answers | A collapsed toggle above the reply |
+| `text` | The reply itself | Markdown, rendered to HTML |
+| `usage` | Once, at the end | Token counts beneath the reply |
+
+The model reasons before answering, which can take several seconds on a
+complex question. Surfacing that as a `thinking` indicator means the user
+sees activity within a second rather than an empty bubble.
+
+Replies are markdown, so the client renders them through `marked` and then
+sanitises the result with `DOMPurify`. The sanitising step is required, not
+cosmetic: a customer can write anything into the chat, the model can be
+induced to repeat it, and unsanitised model output reaching `innerHTML`
+would execute it.
 
 The model is stateless — it retains nothing between requests — so the entire
 conversation is resent on every call.
@@ -72,7 +90,6 @@ request.
 
 - **Conversations are not persisted.** History is held client-side and lost
   on refresh.
-- **Responses are not streamed.** The client waits for the complete reply.
 - **No live data access.** The agent can quote policy but cannot look up an
   order or check a shipment.
 - **No per-user rate limiting or spend controls.**
