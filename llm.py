@@ -12,11 +12,13 @@ import random  # Adds a random bit to the retry wait, so every copy of the app d
 
 from dotenv import load_dotenv  # Reads the .env file holding our API key. .env is listed in .gitignore, so it never gets committed.
 from openai import (
-    APIConnectionError,  # never reached the server at all
-    APITimeoutError,  # reached it, but it never replied
+    APIError,  # the base class every provider error inherits from
     AsyncOpenAI,  # the non-blocking version of the client
-    InternalServerError,  # the server broke. Their fault, not ours
-    RateLimitError,  # we're sending too fast
+    AuthenticationError,  # our key is wrong
+    BadRequestError,  # we sent something malformed
+    NotFoundError,  # no such model
+    PermissionDeniedError,  # our key is not allowed to do this
+    UnprocessableEntityError,  # the request made no sense
 )
 
 # Read the .env file sitting next to this one.
@@ -53,12 +55,30 @@ client = AsyncOpenAI(
 
 # Failures split into two kinds, and they need opposite reactions:
 #
-#   "the server had a bad moment"  -> try again, it'll probably work
 #   "you asked for something wrong" -> don't bother, you'll get the same no
+#   "the server had a bad moment"   -> try again, it'll probably work
 #
-# Only the first kind is listed here. Everything else fails immediately,
-# which is what we want — a typo should be loud, not quietly retried.
-RETRYABLE = (InternalServerError, RateLimitError, APITimeoutError, APIConnectionError)
+# We list the PERMANENT ones and treat everything else as worth retrying.
+#
+# That way round on purpose. Listing what to retry looks tidier but quietly
+# misses things: the library raises a plain APIError when a provider reports
+# a problem partway through a stream, and a plain APIError is not an instance
+# of any specific error type, so a list of specific types never matches it.
+# The result was a server that looked like it retried and never did.
+#
+# Listing the permanent ones cannot fail that way. A new kind of transient
+# error gets retried by default, which is the safer way to be wrong.
+PERMANENT = (
+    BadRequestError,          # 400 — malformed; sending it again is pointless
+    AuthenticationError,      # 401 — wrong key; needs a human
+    PermissionDeniedError,    # 403 — not allowed; needs a human
+    NotFoundError,            # 404 — no such model; a typo
+    UnprocessableEntityError, # 422 — the request made no sense
+)
+
+# Anything else the library raises. Timeouts, dropped connections, rate
+# limits, 5xx, and the bare APIError that streams produce.
+RETRYABLE = (APIError,)
 
 # Four goes in total: the first try, plus three more.
 MAX_ATTEMPTS = 4
@@ -71,25 +91,12 @@ MAX_ATTEMPTS = 4
 # a short fixed wait burns all our tries before it's ready.
 BACKOFF_BASE = 0.6
 
-async def chat(**kwargs):
-    """Make one request to the model, retrying if it fails for a silly reason.
+async def _with_retry(attempt_once, what: str):
+    """Run something, and try again if it fails for a silly reason.
 
-    WHO USES THIS
-    -------------
-    Nothing outside this file calls it directly any more — the app talks to
-    `stream()` below, because replies are sent to the browser as they are
-    written. But `stream()` is built ON this function: it is what opens the
-    connection, so the retrying lives in one place instead of two.
-
-    It stays public rather than becoming private because not every request
-    wants streaming. Summarising an old conversation, for instance, has no
-    user waiting on it word by word, and would use this directly.
-
-    ABOUT async
-    -----------
-    `async def` means this function can pause in the middle. While it is
-    paused waiting for the model, the server is free to serve other people
-    instead of sitting idle. Because it can pause, callers write `await`.
+    `attempt_once` is an async function taking no arguments. It gets called
+    afresh each try, so whatever it does is started from scratch rather than
+    resumed halfway.
     """
     # Somewhere to keep the last error we saw.
     #
@@ -100,10 +107,12 @@ async def chat(**kwargs):
 
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
-            # The real call. `await` pauses here until the model replies,
-            # letting other requests run in the meantime.
-            # If it works, we return and the retry code below never runs.
-            return await client.chat.completions.create(**kwargs)
+            return await attempt_once()
+
+        except PERMANENT:
+            # Our mistake. Retrying would fail identically, just slower, and
+            # would bury the real problem under a delay. Let it through.
+            raise
 
         except RETRYABLE as e:
             last_error = e
@@ -123,7 +132,7 @@ async def chat(**kwargs):
 
             # Say it out loud. Silent retries make things feel mysteriously
             # slow and teach you nothing.
-            print(f"  [retry {attempt}/{MAX_ATTEMPTS - 1}] "
+            print(f"  [retry {attempt}/{MAX_ATTEMPTS - 1}] {what}: "
                   f"{type(e).__name__} - waiting {delay:.1f}s")
 
             # THE MOST IMPORTANT LINE IN THIS FILE.
@@ -140,6 +149,28 @@ async def chat(**kwargs):
     # Everything failed. Throw the real error so the caller sees exactly what
     # went wrong. Returning nothing here would hide the problem.
     raise last_error
+
+
+async def chat(**kwargs):
+    """Make one request to the model, retrying if it fails for a silly reason.
+
+    WHO USES THIS
+    -------------
+    Nothing outside this file calls it directly any more — the app talks to
+    `stream()` below, because replies are sent to the browser as they are
+    written. It stays public because not every request wants streaming:
+    summarising an old conversation, for instance, has no user waiting on it
+    word by word, and would use this.
+
+    ABOUT async
+    -----------
+    `async def` means this function can pause in the middle. While it is
+    paused waiting for the model, the server is free to serve other people
+    instead of sitting idle. Because it can pause, callers write `await`.
+    """
+    return await _with_retry(
+        lambda: client.chat.completions.create(**kwargs), "request"
+    )
 
 
 async def stream(**kwargs):
@@ -178,19 +209,44 @@ async def stream(**kwargs):
     # are NOT in the pieces; they come in one final message, and only if we
     # ask for them here. Leave this out and cost tracking silently stops
     # working, with no error to tell you.
-    opened = await chat(**kwargs, stream=True, stream_options={"include_usage": True})
+    request = {**kwargs, "stream": True, "stream_options": {"include_usage": True}}
 
-    # NOTE ON RETRIES: the `chat()` call above covers opening the stream, so
-    # a provider hiccup before the first word still gets retried invisibly.
-    # Once text starts flowing we are past the point of no return — those
-    # bytes are already in the user's browser and cannot be taken back. A
-    # failure from here on has to be visible rather than quietly retried.
+    # WHERE THE RETRY STOPS, AND WHY IT REACHES THIS FAR
+    #
+    # Opening a stream returns the moment the connection is up, before the
+    # model has written anything — so a provider that is busy does not fail
+    # at that point, it fails at the FIRST READ. Retrying only the opening
+    # therefore catches almost nothing, which is exactly the bug this
+    # replaces.
+    #
+    # So the retry covers opening the stream AND reading its first chunk.
+    # Both happen before a single byte reaches the browser, so starting over
+    # is invisible to the user.
+    #
+    # After that we are past the point of no return: those bytes are already
+    # on the page and cannot be withdrawn. A failure from here on is
+    # surfaced rather than quietly retried.
+    async def open_and_read_first():
+        opened = await client.chat.completions.create(**request)
+        chunks = opened.__aiter__()
+        # anext() runs the stream far enough to get the first chunk, which
+        # is where a busy provider actually reports itself.
+        return chunks, await anext(chunks, None)
+
+    chunks, first_chunk = await _with_retry(open_and_read_first, "stream")
     # How much of the output was the model thinking, versus answering.
     # Used to estimate the token split, since the provider will not tell us.
     thinking_chars = 0
     answer_chars = 0
 
-    async for chunk in opened:
+    async def everything():
+        """The first chunk we already fetched, then the rest."""
+        if first_chunk is not None:
+            yield first_chunk
+        async for rest in chunks:
+            yield rest
+
+    async for chunk in everything():
         # The final chunk carries usage and has no text.
         if chunk.usage:
             written = chunk.usage.completion_tokens

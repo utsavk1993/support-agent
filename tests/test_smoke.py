@@ -264,15 +264,21 @@ def test_thinking_tokens_are_estimated_from_how_much_was_reasoning(monkeypatch):
         delta = SimpleNamespace(content=content, reasoning_content=reasoning)
         return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=usage)
 
-    async def fake_open(**kwargs):
-        async def chunks():
-            yield chunk(reasoning="t" * 75)   # 75 characters of thinking
-            yield chunk(content="a" * 25)     # 25 characters of answer
-            yield SimpleNamespace(choices=[], usage=SimpleNamespace(
-                prompt_tokens=500, completion_tokens=100, total_tokens=600))
-        return chunks()
+    class Stream:
+        def __aiter__(self):
+            async def chunks():
+                yield chunk(reasoning="t" * 75)   # 75 characters of thinking
+                yield chunk(content="a" * 25)     # 25 characters of answer
+                yield SimpleNamespace(choices=[], usage=SimpleNamespace(
+                    prompt_tokens=500, completion_tokens=100, total_tokens=600))
+            return chunks()
 
-    monkeypatch.setattr(llm, "chat", fake_open)
+    async def create(**kwargs):
+        return Stream()
+
+    # stream() calls the client directly, so that is what gets stubbed —
+    # the retry now wraps opening the stream AND reading its first chunk.
+    monkeypatch.setattr(llm.client.chat.completions, "create", create)
 
     async def collect():
         return [piece async for piece in llm.stream(model="x", messages=[])]
