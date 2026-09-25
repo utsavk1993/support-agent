@@ -24,8 +24,17 @@ They never share a connection, so the loops never collide.
 
 import asyncio
 import os
+from pathlib import Path
 
 import pytest
+from dotenv import load_dotenv
+
+# Use the same settings the app uses, so tests talk to the database you are
+# actually developing against rather than a guess about where it lives.
+#
+# load_dotenv does not overwrite variables that are already set, so CI —
+# which provides its own DATABASE_URL and has no .env — is unaffected.
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 os.environ.setdefault(
     "DATABASE_URL",
