@@ -35,11 +35,6 @@ jobs:
           # reads the source directly. Compiled languages need a build step
           # here so it can watch the compiler.
           #
-          # TypeScript scanning is worth adding now the client is a real
-          # application, but adding a language creates a configuration the
-          # base branch has no baseline for, which blocks the code scanning
-          # check. It needs its own pull request, merged on its own.
-          #
           # To widen coverage beyond security defaults, add:
           #   queries: security-extended,security-and-quality
 
