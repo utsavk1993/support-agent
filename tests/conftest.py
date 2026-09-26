@@ -94,8 +94,10 @@ _ensure_test_database_exists(os.environ["DATABASE_URL"])
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-import llm  # noqa: E402
-import main  # noqa: E402
+# Imported only now, AFTER DATABASE_URL has been pointed at the test
+# database. app.config reads the environment as it is imported, so the
+# order of these lines is load-bearing rather than stylistic.
+from app import llm, main  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

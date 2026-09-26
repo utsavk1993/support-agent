@@ -1,70 +1,27 @@
 """
-main.py — the web server.
-
-Routes:
+routes.py — the HTTP endpoints.
 
   GET  /                        the chat page
   POST /api/chat                send a message, stream the reply
   GET  /api/conversations/{id}  load a stored conversation
 
-If you have used Express in Node, this will feel familiar: routes, a handler
-per route, JSON in and JSON out. FastAPI adds automatic checking of the
-incoming data, which we use below.
-
-RUN IT WITH:
-    docker compose up -d
-    uvicorn main:app --reload
+Separate from main.py, which builds the application. These two change for
+different reasons: this file changes when the product does, that one when
+the infrastructure does.
 """
 
-import json
-import os
 import uuid
-from contextlib import asynccontextmanager
-from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request  # The server, errors, and the incoming request.
-from fastapi.responses import (  # Hands back a file from disk, or a reply sent in pieces.
-    FileResponse,
-    StreamingResponse,
-)
+from fastapi import APIRouter, HTTPException, Request  # Route grouping, errors, the incoming request.
+from fastapi.responses import FileResponse, StreamingResponse  # A file from disk, or a reply sent in pieces.
 from pydantic import BaseModel, Field  # Describes the shape of incoming JSON so FastAPI can check it for us.
-from starlette.middleware.sessions import SessionMiddleware  # Signed cookies.
 
-import llm  # Our own file — the only thing here that talks to the model.
-import store  # Our own file — the only thing here that talks to the database.
-from prompts import SUPPORT_POLICY  # The rulebook the agent has to follow.
+from app import config, llm, sse, store  # Our own modules.
+from app.prompts import SUPPORT_POLICY  # The rulebook the agent has to follow.
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Open the database when the server starts, close it when it stops.
-
-    Everything before `yield` runs at startup, everything after at shutdown.
-    The connection pool is opened once and shared, because establishing a
-    connection is slow and Postgres limits how many can exist at once.
-    """
-    await store.connect()
-    yield
-    await store.disconnect()
-
-
-app = FastAPI(title="Northwind Support Agent", lifespan=lifespan)
-
-# Gives every visitor a cookie holding a random identifier, signed with our
-# secret. The browser can read it but cannot change it: altering the value
-# breaks the signature and the server rejects it. That is what makes "this
-# conversation is not yours" enforceable rather than merely polite.
-#
-# The key must stay the same across restarts. Change it and every existing
-# session becomes invalid, which on a deploy means logging everyone out.
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=os.getenv("SECRET_KEY", "development-only-not-for-production"),
-    same_site="lax",      # not sent on cross-site requests, which blocks CSRF
-    https_only=False,     # set True in production, once there is TLS
-)
-
-STATIC_DIR = Path(__file__).parent / "static"
+# A router collects endpoints so main.py can attach them in one line, rather
+# than every route needing to reach for the application object itself.
+router = APIRouter()
 
 
 def owner_of(request: Request) -> str:
@@ -93,13 +50,13 @@ class ChatRequest(BaseModel):
     conversation_id: str | None = None
 
 
-@app.get("/")
+@router.get("/")
 async def serve_page():
     """When someone visits the site, send them the chat page."""
-    return FileResponse(STATIC_DIR / "index.html")
+    return FileResponse(config.STATIC_DIR / "index.html")
 
 
-@app.get("/api/conversations/{conversation_id}")
+@router.get("/api/conversations/{conversation_id}")
 async def load_conversation(conversation_id: str, request: Request):
     """The stored messages of a conversation, so a refreshed page can restore it."""
     owner = owner_of(request)
@@ -118,7 +75,7 @@ async def load_conversation(conversation_id: str, request: Request):
     }
 
 
-@app.post("/api/chat")
+@router.post("/api/chat")
 async def chat(body: ChatRequest, request: Request):
     """Take one message, ask the model, and stream the reply back.
 
@@ -151,7 +108,7 @@ async def chat(body: ChatRequest, request: Request):
     history = await store.load_messages(conversation_id, owner)
     model_messages = [{"role": "system", "content": SUPPORT_POLICY}] + history
 
-    pieces = llm.stream(model=llm.MODEL, messages=model_messages, max_tokens=1024)
+    pieces = llm.stream(model=llm.MODEL, messages=model_messages, max_tokens=config.MAX_REPLY_TOKENS)
 
     # Pull the FIRST piece before we answer the browser at all.
     #
@@ -184,7 +141,7 @@ async def chat(body: ChatRequest, request: Request):
 
         # Tell the browser which conversation this is, so a new one can be
         # remembered and sent back with the next message.
-        yield f"data: {json.dumps({'type': 'conversation', 'id': conversation_id})}\n\n"
+        yield sse.event({"type": "conversation", "id": conversation_id})
 
         try:
             for piece in (first_piece,):
@@ -192,21 +149,21 @@ async def chat(body: ChatRequest, request: Request):
                     continue
                 if piece["type"] == "text":
                     reply += piece["text"]
-                yield f"data: {json.dumps(piece)}\n\n"
+                yield sse.event(piece)
 
             async for piece in pieces:
                 if piece["type"] == "text":
                     reply += piece["text"]
                 elif piece["type"] == "usage":
                     usage = piece
-                yield f"data: {json.dumps(piece)}\n\n"
+                yield sse.event(piece)
 
         except Exception as error:
             # Past the point of no return: the browser already has part of
             # the answer and a 200 status. The only way to report this is
             # inside the stream, and the client has to handle it.
             print(f"[stream broke] {type(error).__name__}: {error}")
-            yield f"data: {json.dumps({'type': 'error', 'message': 'The reply was cut short. Please try again.'})}\n\n"
+            yield sse.error_event("The reply was cut short. Please try again.")
 
         finally:
             # Save whatever the customer actually saw, even if the stream
@@ -217,13 +174,6 @@ async def chat(body: ChatRequest, request: Request):
 
     return StreamingResponse(
         send_events(),
-        media_type="text/event-stream",
-        headers={
-            # Some proxies hold a response until it is complete, which turns
-            # streaming back into waiting. This asks them not to. It changes
-            # nothing locally, which is exactly why it is easy to forget
-            # until it breaks in production.
-            "X-Accel-Buffering": "no",
-            "Cache-Control": "no-cache",
-        },
+        media_type=sse.MEDIA_TYPE,
+        headers=sse.HEADERS,
     )

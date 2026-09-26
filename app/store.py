@@ -16,14 +16,13 @@ on the process, not just its own — the same trap as time.sleep. Every
 database call below is awaited.
 """
 
-import os
-from pathlib import Path
-
 import asyncpg
 
-# Where the migrations live, worked out from this file's location so it
-# does not matter which folder you launch the app from.
-MIGRATIONS_DIR = Path(__file__).parent / "migrations"
+from app import config
+
+# Where the migrations live. Worked out from the project root rather than
+# the current directory, so it does not matter where you launch from.
+MIGRATIONS_DIR = config.ROOT / "migrations"
 
 # One pool for the whole app, opened at startup. Opening a connection per
 # request is a well-known way to exhaust a database: connections are
@@ -32,28 +31,13 @@ MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 _pool: asyncpg.Pool | None = None
 
 
-def database_url() -> str:
-    """Where to connect. One environment variable, so local, CI and
-    production differ by configuration rather than by code."""
-    url = os.getenv("DATABASE_URL")
-    if not url:
-        raise RuntimeError(
-            "DATABASE_URL is not set. Copy .env.example to .env, or start "
-            "the local database with: docker compose up -d"
-        )
-    return url
-
-
 async def connect() -> None:
     """Open the pool and bring the schema up to date. Called once, at startup."""
     global _pool
     _pool = await asyncpg.create_pool(
-        database_url(),
+        config.DATABASE_URL,
         min_size=1,
-        # Small on purpose. Every connection costs memory on the database
-        # server, and this app is limited by the model provider long before
-        # it is limited by Postgres.
-        max_size=10,
+        max_size=config.DATABASE_POOL_SIZE,
         # Refuse to hang forever waiting for a free connection.
         command_timeout=30,
     )

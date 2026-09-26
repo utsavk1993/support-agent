@@ -21,7 +21,6 @@ CREATE TABLE conversations (
 -- difference between checking one row and scanning the whole table.
 CREATE INDEX conversations_owner_idx ON conversations (owner_id, updated_at DESC);
 
-
 CREATE TABLE messages (
     id              bigserial   PRIMARY KEY,
 
