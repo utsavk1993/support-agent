@@ -41,7 +41,10 @@ def visitor(monkeypatch, clean_db):
 
 def send(client, message, conversation_id=None):
     body = {"message": message}
-    if conversation_id:
+    # `is not None`, so a test can deliberately send an empty id. A plain
+    # truth test here silently dropped it, and the helper quietly passed a
+    # case it was supposed to be exercising.
+    if conversation_id is not None:
         body["conversation_id"] = conversation_id
     return client.post("/api/chat", json=body)
 
@@ -237,3 +240,36 @@ def test_a_stale_conversation_id_does_not_wedge_the_chat(visitor):
 
     messages = visitor.get(f"/api/conversations/{new_id}").json()["messages"]
     assert messages[0]["content"] == "next question"
+
+
+# --- ids that are not ids ---------------------------------------------------
+
+MALFORMED_IDS = ["x", "not-a-uuid", "123", "", " ", "../../etc/passwd",
+                 "11111111-2222-3333-4444-55555555555"]   # one digit short
+
+
+@pytest.mark.parametrize("bad_id", MALFORMED_IDS)
+def test_a_malformed_id_is_refused_when_loading(visitor, bad_id):
+    """It reaches a uuid column, so it used to raise inside the driver."""
+    response = visitor.get(f"/api/conversations/{bad_id}")
+    assert response.status_code == 404, f"{bad_id!r} gave {response.status_code}"
+
+
+@pytest.mark.parametrize("bad_id", MALFORMED_IDS)
+def test_a_malformed_id_is_refused_when_posting(visitor, bad_id):
+    response = send(visitor, "hello", bad_id)
+    assert response.status_code in (404, 422), f"{bad_id!r} gave {response.status_code}"
+
+
+def test_malformed_and_unknown_ids_are_indistinguishable(visitor):
+    """The whole point of answering 404 rather than 403.
+
+    If a malformed id failed differently from a well-formed unknown one,
+    the difference would tell someone probing which of their guesses were
+    at least shaped correctly.
+    """
+    unknown = visitor.get("/api/conversations/11111111-2222-3333-4444-555555555555")
+    malformed = visitor.get("/api/conversations/not-a-uuid")
+
+    assert unknown.status_code == malformed.status_code == 404
+    assert unknown.json() == malformed.json()

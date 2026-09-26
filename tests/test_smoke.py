@@ -22,7 +22,10 @@ from app.prompts import SUPPORT_POLICY
 def send(client, message="restocking fee?", conversation_id=None):
     """POST one message, the way the browser does."""
     body = {"message": message}
-    if conversation_id:
+    # `is not None`, so a test can deliberately send an empty id. A plain
+    # truth test here silently dropped it, and the helper quietly passed a
+    # case it was supposed to be exercising.
+    if conversation_id is not None:
         body["conversation_id"] = conversation_id
     return client.post("/api/chat", json=body)
 
