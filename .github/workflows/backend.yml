@@ -1,23 +1,30 @@
-name: CI
+name: Backend
 
-# Run on every push to main, and on every pull request targeting it.
+# Only runs when something the Python application depends on changes.
+# A CSS tweak in web/ has no way of breaking pytest, and starting a Postgres
+# container to prove that wastes a minute of everybody's time.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    paths:
+      - "app/**"
+      - "tests/**"
+      - "migrations/**"
+      - "requirements*.txt"
+      - "pyproject.toml"
+      - ".github/workflows/backend.yml"
 
 jobs:
   check:
     runs-on: ubuntu-latest
 
     env:
-      # The client is constructed at import time and refuses to build without
-      # a key, so CI needs *a* value here. Nothing in the test suite makes a
-      # real API call — the model is stubbed out — so a placeholder is enough
-      # and no real secret is needed.
+      # The model client is built at import time and refuses to exist without
+      # a key, so CI needs *a* value. Nothing here makes a real API call —
+      # the model is stubbed — so a placeholder is enough and no secret is
+      # configured.
       NVIDIA_API_KEY: dummy-key-not-used-in-tests
-      # Points at the service container below, not a hosted database.
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/support_test
       SECRET_KEY: not-a-real-secret-only-signs-test-cookies
 
@@ -60,12 +67,20 @@ jobs:
 
       - name: Check the app actually starts
         # Lint and tests both run against imported code. This catches the
-        # case where the app imports fine but dies on startup.
+        # case where everything imports fine but the app dies on startup —
+        # a bad migration, a missing setting, a broken lifespan.
+        #
+        # It asks for a conversation that does not exist, rather than the
+        # page: that exercises routing, the session cookie and the database,
+        # and needs no built client. Expecting 404 also proves the app is
+        # answering rather than merely listening.
         run: |
           uvicorn app.main:app --port 8000 &
-          for i in $(seq 1 20); do
-            curl -sf http://127.0.0.1:8000/ > /dev/null && break
+          for _ in $(seq 1 20); do
+            curl -s -o /dev/null http://127.0.0.1:8000/api/conversations/x && break
             sleep 0.5
           done
-          curl -sf http://127.0.0.1:8000/ > /dev/null
-          echo "app served the page successfully"
+          code=$(curl -s -o /dev/null -w '%{http_code}' \
+            http://127.0.0.1:8000/api/conversations/11111111-2222-3333-4444-555555555555)
+          test "$code" = "404" || { echo "expected 404, got $code"; exit 1; }
+          echo "app started and answered correctly"

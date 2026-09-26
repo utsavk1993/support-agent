@@ -13,3 +13,11 @@ __pycache__/
 .DS_Store
 .idea/
 .vscode/
+
+# Built client — produced by `npm run build`, not committed.
+# Committing build output means every change shows up twice in a diff.
+static/
+
+# Node
+web/node_modules/
+web/dist/
