@@ -12,7 +12,7 @@ import httpx
 import pytest
 from openai import APIError, AuthenticationError, BadRequestError, NotFoundError
 
-import llm
+from app import llm
 
 
 @pytest.fixture(autouse=True)

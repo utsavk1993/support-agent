@@ -7,10 +7,8 @@ or changing how we handle failures is a change to ONE file.
 """
 
 import asyncio  # Pauses between retries WITHOUT freezing everyone else. See the note further down.
-import os  # Read environment variables (like process.env in Node), and build file paths.
 import random  # Adds a random bit to the retry wait, so every copy of the app doesn't retry at the same instant.
 
-from dotenv import load_dotenv  # Reads the .env file holding our API key. .env is listed in .gitignore, so it never gets committed.
 from openai import (
     APIError,  # the base class every provider error inherits from
     AsyncOpenAI,  # the non-blocking version of the client
@@ -21,33 +19,24 @@ from openai import (
     UnprocessableEntityError,  # the request made no sense
 )
 
-# Read the .env file sitting next to this one.
-#
-# We build the path from THIS file's location rather than just saying ".env",
-# because a bare ".env" is looked up relative to whatever folder you happened
-# to run the command from. This way it works no matter where you launch it.
-load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+from app import config
 
-# Which model we're using. One line, one place.
-MODEL = "nvidia/nemotron-3-super-120b-a12b"
+# Which model to use, re-exported so callers can write llm.MODEL.
+MODEL = config.MODEL
 
 # Build the connection once, when this file is first imported, and share it.
 # Reusing one client keeps the connection to the server open between calls,
 # so we don't redo the setup handshake every single time.
+#
 # AsyncOpenAI is the same client as OpenAI, with one difference: while it
 # waits for a reply, it hands control back so the server can get on with
 # other people's requests. The plain OpenAI client just sits there.
 client = AsyncOpenAI(
     # This URL is what makes it NVIDIA rather than OpenAI. The library itself
     # doesn't care who it's talking to.
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=os.getenv("NVIDIA_API_KEY"),
-
-    # If the server hasn't answered in 60 seconds, stop waiting. Without this,
-    # a request that never gets a reply hangs forever, and takes our app
-    # with it — no error, no crash, just stuck.
-    timeout=60.0,
-
+    base_url=config.NVIDIA_BASE_URL,
+    api_key=config.NVIDIA_API_KEY,
+    timeout=config.REQUEST_TIMEOUT,
     # Turn off the library's own retrying, because we do our own below.
     # Theirs is silent, so you'd never learn the server is unreliable.
     max_retries=0,

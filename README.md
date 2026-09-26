@@ -14,7 +14,7 @@ pip install -r requirements.txt
 cp .env.example .env        # then add your NVIDIA API key
 
 docker compose up -d        # Postgres on port 5433
-uvicorn main:app --reload
+uvicorn app.main:app --reload
 ```
 
 Open <http://127.0.0.1:8000>. An interactive API explorer is available at
@@ -24,13 +24,16 @@ Open <http://127.0.0.1:8000>. An interactive API explorer is available at
 
 | Path | Responsibility |
 |---|---|
-| `main.py` | HTTP server. Serves the client and handles chat requests. |
-| `llm.py` | Model client. Sole point of contact with the inference provider. |
-| `store.py` | Database access. Sole point of contact with Postgres. |
+| `app/main.py` | Application setup: lifespan, middleware. |
+| `app/routes.py` | The HTTP endpoints. |
+| `app/config.py` | Every setting read from the environment, in one place. |
+| `app/llm.py` | Model client. Sole point of contact with the inference provider. |
+| `app/store.py` | Database access. Sole point of contact with Postgres. |
+| `app/prompts.py` | The support policy that governs every answer. |
+| `app/sse.py` | Server-Sent Events formatting. |
 | `migrations/` | Numbered SQL files, applied once each at startup. |
-| `prompts.py` | The support policy that governs every answer. |
 | `static/index.html` | Browser client. |
-| `tests/` | Smoke tests. No API key or network required. |
+| `tests/` | Tests. No API key or network required. |
 
 ## How it works
 

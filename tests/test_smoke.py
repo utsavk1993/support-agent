@@ -15,10 +15,8 @@ import pytest
 from conftest import fake_stream
 from pydantic import ValidationError
 
-import llm
-import main
-import store
-from prompts import SUPPORT_POLICY
+from app import llm, main, routes, store
+from app.prompts import SUPPORT_POLICY
 
 
 def send(client, message="restocking fee?", conversation_id=None):
@@ -131,7 +129,7 @@ def test_malformed_requests_are_rejected(client, bad_body):
 
 def test_chat_request_requires_a_message():
     with pytest.raises(ValidationError):
-        main.ChatRequest(conversation_id="abc")
+        routes.ChatRequest(conversation_id="abc")
 
 
 @pytest.mark.parametrize("fact", [

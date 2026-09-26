@@ -11,8 +11,7 @@ import pytest
 from conftest import db
 from fastapi.testclient import TestClient
 
-import llm
-import main
+from app import llm, main
 
 
 async def fake_stream(**kwargs):
