@@ -1,0 +1,112 @@
+/* Carried across from the hand-written client. No visual redesign here —
+   this change is about how the client is built, not how it looks. */
+
+:root {
+  --bg: #ffffff; --panel: #f6f7f9; --border: #e3e6ea;
+  --text: #1a1d21; --muted: #6b7280;
+  --user: #2563eb; --user-text: #ffffff;
+  --accent: #2563eb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16181c; --panel: #1e2126; --border: #2c3036;
+    --text: #e6e8ea; --muted: #9aa1ab;
+    --user: #3b82f6; --user-text: #ffffff;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  display: flex; flex-direction: column; height: 100vh;
+}
+
+header {
+  padding: 14px 16px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+}
+header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+header span { color: var(--muted); font-size: 13px; }
+
+#chat { flex: 1; overflow-y: auto; padding: 16px; }
+.wrap { max-width: 760px; margin: 0 auto; }
+
+.msg { margin-bottom: 14px; display: flex; }
+.msg.user { justify-content: flex-end; }
+
+.bubble {
+  padding: 10px 14px; border-radius: 14px; max-width: 78%;
+  word-wrap: break-word;
+}
+/* The customer's own message is plain text, so their line breaks have to
+   survive. The assistant's reply is HTML, where newlines between tags are
+   just formatting — leaving pre-wrap on would render every one of them as
+   a blank line, which is what made replies look so airy. */
+.user .body { white-space: pre-wrap; }
+.user .bubble { background: var(--user); color: var(--user-text); border-bottom-right-radius: 4px; }
+.assistant .bubble { background: var(--panel); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+
+.meta { font-size: 11px; color: var(--muted); margin-top: 5px; }
+
+/* The model's formatted reply. Margins are trimmed so a single paragraph
+   does not sit in a pool of empty space. */
+.body > *:first-child { margin-top: 0; }
+.body > *:last-child { margin-bottom: 0; }
+.body p { margin: 0 0 8px; }
+.body ul, .body ol { margin: 0 0 8px; padding-left: 22px; }
+.body li { margin: 0; }
+/* The model leaves blank lines between bullets, which markdown treats as a
+   "loose" list and wraps each item in its own paragraph. Those carry a
+   bottom margin that stacks with the list spacing, so we flatten them. */
+.body li > p { margin: 0; }
+.body li + li { margin-top: 5px; }
+.body li > ul, .body li > ol { margin: 4px 0 0; }
+.body code { background: rgba(127,127,127,.18); padding: 1px 5px; border-radius: 4px; font-size: 13px; }
+.body pre { background: rgba(127,127,127,.14); padding: 10px; border-radius: 8px; overflow-x: auto; }
+.body pre code { background: none; padding: 0; }
+.body h1, .body h2, .body h3 { font-size: 15px; margin: 10px 0 6px; }
+.body table { border-collapse: collapse; margin: 4px 0 8px; }
+.body th, .body td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+
+/* The model's reasoning, folded away by default. */
+details.thinking { margin-bottom: 8px; font-size: 12px; color: var(--muted); }
+details.thinking summary {
+  cursor: pointer; user-select: none; list-style: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px; border-radius: 999px;
+  background: rgba(127,127,127,.14);
+}
+details.thinking summary::-webkit-details-marker { display: none; }
+details.thinking[open] summary { margin-bottom: 6px; }
+.thinking-body {
+  white-space: pre-wrap; padding: 8px 11px; border-radius: 8px;
+  background: rgba(127,127,127,.09); border-left: 2px solid var(--border);
+  max-height: 220px; overflow-y: auto; line-height: 1.5;
+}
+
+/* A gentle pulse while the model is still working. */
+.pulse { animation: pulse 1.3s ease-in-out infinite; }
+@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .45 } }
+
+.empty { color: var(--muted); text-align: center; padding: 40px 16px; }
+.empty code { background: var(--panel); padding: 2px 6px; border-radius: 4px; }
+
+footer { border-top: 1px solid var(--border); padding: 12px 16px; }
+form { max-width: 760px; margin: 0 auto; display: flex; gap: 8px; }
+
+input {
+  flex: 1; padding: 11px 14px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--bg); color: var(--text);
+  font: inherit; outline: none;
+}
+input:focus { border-color: var(--accent); }
+input:disabled { opacity: .6; }
+
+button {
+  padding: 11px 20px; border-radius: 10px; border: none;
+  background: var(--accent); color: #fff; font: inherit; font-weight: 500;
+  cursor: pointer;
+}
+button:disabled { opacity: .5; cursor: default; }

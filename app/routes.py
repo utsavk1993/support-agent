@@ -52,8 +52,19 @@ class ChatRequest(BaseModel):
 
 @router.get("/")
 async def serve_page():
-    """When someone visits the site, send them the chat page."""
-    return FileResponse(config.STATIC_DIR / "index.html")
+    """When someone visits the site, send them the chat page.
+
+    The page is built from the React app in web/ and is not committed, so a
+    fresh checkout has none until it has been built. Saying so plainly beats
+    a 500 that makes it look like the server is broken.
+    """
+    page = config.STATIC_DIR / "index.html"
+    if not page.is_file():
+        raise HTTPException(
+            status_code=503,
+            detail="The client has not been built. Run: npm --prefix web install && npm --prefix web run build",
+        )
+    return FileResponse(page)
 
 
 @router.get("/api/conversations/{conversation_id}")

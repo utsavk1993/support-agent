@@ -41,10 +41,28 @@ def reply_events(response):
     return [e for e in read_events(response) if e["type"] != "conversation"]
 
 
-def test_page_is_served(client):
+def test_the_page_is_served_once_the_client_is_built(client, tmp_path, monkeypatch):
+    """The built client is not committed, so this builds a stand-in for it."""
+    (tmp_path / "index.html").write_text('<div id="root"></div>')
+    monkeypatch.setattr(main.config, "STATIC_DIR", tmp_path)
+
     response = client.get("/")
     assert response.status_code == 200
-    assert "Northwind" in response.text
+    assert 'id="root"' in response.text
+
+
+def test_a_missing_client_explains_itself(client, tmp_path, monkeypatch):
+    """A fresh checkout has no client until `npm run build` has run.
+
+    Saying so beats a 500 that makes it look like the server is broken —
+    and the backend CI job deliberately does not build the client, so this
+    is the state it runs in.
+    """
+    monkeypatch.setattr(main.config, "STATIC_DIR", tmp_path)   # empty
+
+    response = client.get("/")
+    assert response.status_code == 503
+    assert "npm" in response.json()["detail"], "the error should say how to fix it"
 
 
 def test_reply_arrives_in_pieces(client):
