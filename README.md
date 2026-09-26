@@ -14,6 +14,10 @@ pip install -r requirements.txt
 cp .env.example .env        # then add your NVIDIA API key
 
 docker compose up -d        # Postgres on port 5433
+
+npm --prefix web install    # once
+npm --prefix web run build  # builds the client into static/
+
 uvicorn app.main:app --reload
 ```
 
@@ -32,7 +36,7 @@ Open <http://127.0.0.1:8000>. An interactive API explorer is available at
 | `app/prompts.py` | The support policy that governs every answer. |
 | `app/sse.py` | Server-Sent Events formatting. |
 | `migrations/` | Numbered SQL files, applied once each at startup. |
-| `static/index.html` | Browser client. |
+| `web/` | The React client. Built into `static/`, which is not committed. |
 | `tests/` | Tests. No API key or network required. |
 
 ## How it works
@@ -118,12 +122,39 @@ to four times with exponential backoff and jitter. Client errors — bad
 request, bad key, unknown model — are not retried, since the same request
 would fail identically.
 
+## Working on the client
+
+Two servers, so the client gets hot reload:
+
+```bash
+uvicorn app.main:app --reload   # terminal one — the API, on :8000
+npm --prefix web run dev        # terminal two — the client, on :5173
+```
+
+Open <http://127.0.0.1:5173>. Vite forwards anything under `/api` to the
+Python server, so the browser sees a single origin and there is no CORS to
+configure.
+
+In production there is only one server: `npm run build` writes the client
+into `static/`, and FastAPI serves it.
+
+```
+web/src/
+  api.ts               requests, and parsing the event stream
+  types.ts             the five shapes an event can take
+  markdown.ts          markdown to HTML, via a sanitiser
+  hooks/useChat.ts     conversation state and streaming
+  components/          one file per piece of the interface
+```
+
 ## Development
 
 ```bash
 pip install -r requirements-dev.txt
 ruff check .
 pytest -q
+
+npm --prefix web run build   # TypeScript is type-checked as it builds
 ```
 
 Tests stub the model call, so they need no API key, make no network requests
@@ -135,8 +166,17 @@ The suite drops tables to prove the migrations work and empties them between
 tests, so it must never be pointed at a database you are developing against —
 the `_test` suffix is applied unconditionally for that reason.
 
-CI starts its own Postgres and runs lint, tests and a startup check on every
-pull request.
+CI is split so a change only runs the checks it can affect:
+
+| Workflow | Runs when | Does |
+|---|---|---|
+| Backend | `app/`, `tests/`, `migrations/`, requirements change | ruff, pytest against a real Postgres, a startup check |
+| Frontend | `web/` changes | oxlint, then a build — which type-checks |
+| CodeQL | **always** | security analysis of Python and TypeScript |
+
+CodeQL is deliberately unfiltered. A merge requires a code scanning result,
+and a workflow skipped by a path filter never reports one — so filtering it
+would block any pull request that happened to miss the filter.
 
 ## Known limitations
 

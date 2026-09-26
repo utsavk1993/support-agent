@@ -1,10 +1,13 @@
 name: CodeQL
 
+# Deliberately NOT filtered by path, unlike the backend and frontend
+# workflows. The branch ruleset requires a code scanning result before a
+# merge, and a check that is skipped never reports — so filtering this one
+# would block every pull request that happened not to touch the filter.
 on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
   schedule:
     # Weekly re-scan. Existing code can become vulnerable without changing,
     # when a new class of vulnerability is discovered after it was written.
@@ -31,6 +34,11 @@ jobs:
           # Python is interpreted, so there is nothing to build — CodeQL
           # reads the source directly. Compiled languages need a build step
           # here so it can watch the compiler.
+          #
+          # TypeScript scanning is worth adding now the client is a real
+          # application, but adding a language creates a configuration the
+          # base branch has no baseline for, which blocks the code scanning
+          # check. It needs its own pull request, merged on its own.
           #
           # To widen coverage beyond security defaults, add:
           #   queries: security-extended,security-and-quality

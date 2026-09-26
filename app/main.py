@@ -12,6 +12,7 @@ RUN IT WITH:
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles  # Serves the built client.
 from starlette.middleware.sessions import SessionMiddleware  # Signed cookies.
 
 from app import config, store
@@ -52,6 +53,18 @@ def create_app() -> FastAPI:
     )
 
     app.include_router(router)
+
+    # Serve the compiled client. Vite builds JavaScript and CSS into
+    # static/assets with hashed filenames, which lets them be cached
+    # forever — a new build produces new names.
+    #
+    # Only mounted if the directory exists. It is not committed, so a fresh
+    # checkout has no client until `npm run build` has run, and the API
+    # should still start and work in that state.
+    assets = config.STATIC_DIR / "assets"
+    if assets.is_dir():
+        app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
     return app
 
 

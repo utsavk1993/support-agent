@@ -1,0 +1,41 @@
+name: Frontend
+
+# Only runs when the client changes. It needs no database, no Python and no
+# API key, so it finishes in a fraction of the time the backend job takes.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "web/**"
+      - ".github/workflows/frontend.yml"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        # `ci` rather than `install`: it installs exactly what the lockfile
+        # says and fails if package.json disagrees, so a build here matches
+        # a build anywhere else.
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        # `tsc -b && vite build` — so this type-checks as well as bundling.
+        # A type error fails the job.
+        run: npm run build
