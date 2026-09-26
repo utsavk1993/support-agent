@@ -24,6 +24,9 @@ uvicorn app.main:app --reload
 Open <http://127.0.0.1:8000>. An interactive API explorer is available at
 <http://127.0.0.1:8000/docs>.
 
+Conventions for this repository — where files belong, how commits are
+shaped, the house style for comments — are in [CLAUDE.md](CLAUDE.md).
+
 ## Project structure
 
 | Path | Responsibility |
