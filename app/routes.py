@@ -23,6 +23,34 @@ from app.prompts import SUPPORT_POLICY  # The rulebook the agent has to follow.
 # than every route needing to reach for the application object itself.
 router = APIRouter()
 
+# The answer to every request for a conversation the caller cannot have,
+# whatever the reason: it does not exist, it belongs to someone else, or the
+# id is not even a real id.
+#
+# 404 rather than 403, and deliberately so. A 403 confirms the conversation
+# exists, which lets someone probe for valid ids. Returning one answer for
+# all three cases means the response reveals nothing about which applies.
+NOT_FOUND = HTTPException(status_code=404, detail="Not found.")
+
+
+def parse_conversation_id(value: str) -> uuid.UUID:
+    """Turn a conversation id from a URL into a UUID, or refuse it.
+
+    Conversation ids are uuid columns in the database. A string that is not
+    a UUID cannot match anything, and handed to the driver it raises rather
+    than returning no rows — which surfaced as a 500 and a stack trace for
+    anyone who mistyped a URL.
+
+    It has to be refused the SAME way an unknown id is. A malformed id
+    returning 500 while an unknown one returns 404 would tell someone
+    probing which of their guesses were at least shaped correctly, which is
+    the signal 404 exists to withhold.
+    """
+    try:
+        return uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        raise NOT_FOUND from None
+
 
 def owner_of(request: Request) -> str:
     """Who is making this request.
@@ -71,12 +99,10 @@ async def serve_page():
 async def load_conversation(conversation_id: str, request: Request):
     """The stored messages of a conversation, so a refreshed page can restore it."""
     owner = owner_of(request)
+    parse_conversation_id(conversation_id)
 
     if not await store.conversation_belongs_to(conversation_id, owner):
-        # 404, not 403, and deliberately so. A 403 would confirm that this
-        # conversation exists, which lets someone probe for valid ids. A 404
-        # is the same refusal while giving nothing away.
-        raise HTTPException(status_code=404, detail="Not found.")
+        raise NOT_FOUND
 
     return {
         "conversation_id": conversation_id,
@@ -97,9 +123,15 @@ async def chat(body: ChatRequest, request: Request):
     owner = owner_of(request)
 
     # Continue an existing conversation, or start a new one.
-    if body.conversation_id:
+    #
+    # `is not None` rather than a plain truth test, so an empty string is
+    # treated as a malformed id rather than as "no id given". A client that
+    # sends "" has a bug, and quietly starting a new conversation hides it —
+    # the customer would simply lose their history with no error anywhere.
+    if body.conversation_id is not None:
+        parse_conversation_id(body.conversation_id)
         if not await store.conversation_belongs_to(body.conversation_id, owner):
-            raise HTTPException(status_code=404, detail="Not found.")
+            raise NOT_FOUND
         conversation_id = body.conversation_id
     else:
         conversation_id = str(uuid.uuid4())
