@@ -71,9 +71,7 @@ def _ensure_test_database_exists(url: str) -> None:
     async def create():
         connection = await asyncpg.connect(admin_url)
         try:
-            exists = await connection.fetchval(
-                "SELECT 1 FROM pg_database WHERE datname = $1", name
-            )
+            exists = await connection.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", name)
             if not exists:
                 # CREATE DATABASE cannot run inside a transaction, and the
                 # name cannot be a bound parameter, hence the interpolation.
@@ -84,6 +82,8 @@ def _ensure_test_database_exists(url: str) -> None:
             await connection.close()
 
     asyncio.run(create())
+
+
 os.environ.setdefault("NVIDIA_API_KEY", "dummy-key-not-used-in-tests")
 os.environ.setdefault("SECRET_KEY", "test-only-secret")
 
@@ -110,6 +110,7 @@ def db(sql: str, *args):
     reusing one, and irrelevant at this scale, but it means a test can never
     borrow a connection from the wrong event loop.
     """
+
     async def run():
         connection = await asyncpg.connect(os.environ["DATABASE_URL"])
         try:
@@ -163,9 +164,15 @@ async def fake_stream(pieces=None, fail_after=None):
             {"type": "text", "text": "A used power tool "},
             {"type": "text", "text": "carries a 15% "},
             {"type": "text", "text": "restocking fee."},
-            {"type": "usage", "prompt_tokens": 100, "completion_tokens": 20,
-             "total_tokens": 120, "thinking_tokens": 12, "answer_tokens": 8,
-             "split_is_estimated": True},
+            {
+                "type": "usage",
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+                "thinking_tokens": 12,
+                "answer_tokens": 8,
+                "split_is_estimated": True,
+            },
         ]
     for index, piece in enumerate(pieces):
         if fail_after is not None and index == fail_after:

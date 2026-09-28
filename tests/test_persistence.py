@@ -11,16 +11,22 @@ import pytest
 from conftest import db
 from fastapi.testclient import TestClient
 
-from app import llm, main
+from app import llm, main, store
 
 
 async def fake_stream(**kwargs):
     for piece in [
         {"type": "text", "text": "Used power tools "},
         {"type": "text", "text": "carry a 15% fee."},
-        {"type": "usage", "prompt_tokens": 684, "completion_tokens": 100,
-         "total_tokens": 784, "thinking_tokens": 40, "answer_tokens": 60,
-         "split_is_estimated": True},
+        {
+            "type": "usage",
+            "prompt_tokens": 684,
+            "completion_tokens": 100,
+            "total_tokens": 784,
+            "thinking_tokens": 40,
+            "answer_tokens": 60,
+            "split_is_estimated": True,
+        },
     ]:
         yield piece
 
@@ -59,6 +65,7 @@ def conversation_id_of(response):
 
 # --- the point of the whole exercise ----------------------------------------
 
+
 def test_a_conversation_survives_a_refresh(visitor):
     """Close the tab, come back, and the conversation is still there."""
     first = send(visitor, "Can I return a used power tool?")
@@ -96,6 +103,7 @@ def test_history_comes_from_the_database_not_the_browser(visitor, monkeypatch):
 
 # --- one person cannot read another's conversation --------------------------
 
+
 def test_another_visitor_cannot_load_your_conversation(visitor, monkeypatch):
     conversation_id = conversation_id_of(send(visitor, "my private question"))
 
@@ -124,6 +132,7 @@ def test_an_unknown_conversation_id_is_a_404(visitor):
 
 
 # --- what gets written, and when --------------------------------------------
+
 
 def test_token_counts_are_stored_per_message(visitor):
     conversation_id = conversation_id_of(send(visitor, "restocking fee?"))
@@ -158,6 +167,7 @@ def test_a_reply_that_dies_halfway_still_keeps_what_was_shown(visitor, monkeypat
 
 def test_the_question_survives_a_model_failure(visitor, monkeypatch):
     """Saved before the model is called, so a failure cannot lose it."""
+
     async def refuses(**kwargs):
         raise RuntimeError("provider is down")
         yield  # pragma: no cover - makes this an async generator
@@ -171,6 +181,7 @@ def test_the_question_survives_a_model_failure(visitor, monkeypatch):
 
 
 # --- migrations -------------------------------------------------------------
+
 
 def test_migrations_run_once_and_are_recorded(visitor):
     applied = [r["filename"] for r in db("SELECT filename FROM schema_migrations")]
@@ -244,8 +255,7 @@ def test_a_stale_conversation_id_does_not_wedge_the_chat(visitor):
 
 # --- ids that are not ids ---------------------------------------------------
 
-MALFORMED_IDS = ["x", "not-a-uuid", "123", "", " ", "../../etc/passwd",
-                 "11111111-2222-3333-4444-55555555555"]   # one digit short
+MALFORMED_IDS = ["x", "not-a-uuid", "123", "", " ", "../../etc/passwd", "11111111-2222-3333-4444-55555555555"]  # one digit short
 
 
 @pytest.mark.parametrize("bad_id", MALFORMED_IDS)
@@ -273,3 +283,38 @@ def test_malformed_and_unknown_ids_are_indistinguishable(visitor):
 
     assert unknown.status_code == malformed.status_code == 404
     assert unknown.json() == malformed.json()
+
+
+def test_using_the_database_before_it_is_open_says_so(monkeypatch):
+    """A clear error beats an AttributeError on None.
+
+    This is reachable if something queries during import, or after
+    shutdown has run.
+    """
+    monkeypatch.setattr(store, "_pool", None)
+
+    with pytest.raises(RuntimeError) as failure:
+        store.pool()
+
+    assert "connect()" in str(failure.value), "the error should say what to do"
+
+
+def test_a_reply_that_never_starts_leaves_nothing_behind(visitor, monkeypatch):
+    """The provider accepts the request, then closes without a word.
+
+    There is no text to save, so the conversation should hold the question
+    and no empty assistant message pretending to be an answer.
+    """
+
+    async def says_nothing(**kwargs):
+        return
+        yield  # pragma: no cover - makes this an async generator
+
+    monkeypatch.setattr(llm, "stream", lambda **kwargs: says_nothing())
+
+    response = send(visitor, "a question that gets no answer")
+    assert response.status_code == 200
+
+    conversation_id = conversation_id_of(response)
+    messages = visitor.get(f"/api/conversations/{conversation_id}").json()["messages"]
+    assert [m["role"] for m in messages] == ["user"]

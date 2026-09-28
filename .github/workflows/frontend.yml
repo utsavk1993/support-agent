@@ -11,16 +11,24 @@ on:
       - ".github/workflows/frontend.yml"
 
 jobs:
-  check:
+  # The job key becomes the check name: "Frontend / verify".
+  verify:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      # Needed to post the coverage table onto the pull request. Granted
+      # here rather than to the whole workflow, so only this job has it.
+      pull-requests: write
+
     defaults:
       run:
         working-directory: web
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: npm
@@ -32,8 +40,112 @@ jobs:
         # a build anywhere else.
         run: npm ci
 
-      - name: Lint
+      - name: Lint and formatting
+        # Biome does both. `check` reports differences without rewriting,
+        # so CI fails on unformatted code rather than quietly fixing it and
+        # leaving the branch different from what was reviewed.
         run: npm run lint
+
+      - name: Test
+        # The 100% thresholds live in vite.config.ts, so running this
+        # locally enforces exactly what CI does. Below 100 the command
+        # fails, and the two steps after it still run because of
+        # `if: always()` — a report is most useful when something is wrong.
+        run: npm run test:coverage
+
+      - name: Build the coverage table
+        if: always()
+        # One table, written to a file, then used twice: on the run's
+        # summary page and as a comment on the pull request.
+        run: |
+          node -e '
+            const fs = require("node:fs");
+            const out = [];
+
+            // A hidden marker, so the next run can find this comment and
+            // edit it instead of adding another one.
+            out.push("<!-- coverage:frontend -->");
+
+            let summary;
+            try {
+              summary = require("./coverage/coverage-summary.json");
+            } catch {
+              out.push("### Frontend coverage\n\nThe test run produced no report.");
+              fs.writeFileSync("coverage-table.md", out.join("\n") + "\n");
+              process.exit(0);
+            }
+
+            const metrics = ["statements", "branches", "functions", "lines"];
+            const total = summary.total;
+            const ok = metrics.every((m) => total[m].pct === 100);
+
+            out.push(`### Frontend coverage — ${ok ? "✅" : "❌"}\n`);
+            if (!ok) out.push("Below the 100% this project requires.\n");
+
+            out.push("| | Covered | Total | |");
+            out.push("|---|--:|--:|---|");
+            for (const m of metrics) {
+              const t = total[m];
+              out.push(`| ${m} | ${t.pct}% | ${t.covered}/${t.total} | ${t.pct === 100 ? "" : "⚠️"} |`);
+            }
+
+            // Name any file that is not fully covered, so a failure says
+            // where to look without opening the artifact.
+            //
+            // Files with nothing to cover are skipped. A type-only module
+            // has zero statements, which v8 reports as 0% — listing those
+            // as uncovered would be a permanent false alarm.
+            const short = (p) => p.replace(/^.*\/web\/src\//, "src/");
+            const partial = Object.entries(summary)
+              .filter(([k]) => k !== "total")
+              .filter(([, f]) => f.statements.total > 0)
+              .filter(([, f]) => metrics.some((m) => f[m].pct < 100));
+
+            if (partial.length) {
+              out.push("\n| Not fully covered | |");
+              out.push("|---|--:|");
+              for (const [path, f] of partial) out.push(`| \`${short(path)}\` | ${f.lines.pct}% |`);
+            }
+
+            fs.writeFileSync("coverage-table.md", out.join("\n") + "\n");
+          '
+          cat coverage-table.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the pull request
+        if: always() && github.event_name == 'pull_request'
+        # Edits its own previous comment rather than adding a new one each
+        # push, so a busy pull request does not fill up with stale tables.
+        #
+        # Skipped for pull requests from forks, where the token is
+        # read-only and posting would fail.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          existing=$(gh api "repos/$REPO/issues/$PR/comments" \
+            --jq 'map(select(.body | contains("<!-- coverage:frontend -->"))) | .[0].id // empty')
+
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$existing" \
+              -F body=@coverage-table.md > /dev/null
+            echo "updated comment $existing"
+          else
+            gh api --method POST "repos/$REPO/issues/$PR/comments" \
+              -F body=@coverage-table.md > /dev/null
+            echo "posted a new comment"
+          fi
+
+      - name: Keep the full report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: frontend-coverage
+          # The browsable HTML version, for when the summary is not enough
+          # to see which line is uncovered.
+          path: web/coverage/
+          retention-days: 14
 
       - name: Build
         # `tsc -b && vite build` — so this type-checks as well as bundling.

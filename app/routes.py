@@ -72,6 +72,7 @@ class ChatRequest(BaseModel):
     send the whole thing every turn. Now it sends one message and the id of
     the conversation it belongs to, and the server loads the rest.
     """
+
     message: str = Field(min_length=1, max_length=4000)
 
     # Absent on the first message of a new conversation.

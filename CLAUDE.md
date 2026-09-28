@@ -148,12 +148,34 @@ runs the app on its own. Tests open a short-lived connection per query
 rather than borrowing the application's pool. Getting this wrong produces
 `another operation is in progress`.
 
-**TypeScript.** Tests sit beside the thing they test, named `*.test.tsx` or
-`*.test.ts`.
+**TypeScript.** Vitest with Testing Library, run by `npm test` in `web/`.
+Tests sit beside the thing they test, named `*.test.tsx` or `*.test.ts`,
+inside the component or hook's own folder.
+
+Query the way a person would — `getByRole`, `getByText` — not by class name
+or test id. A test that breaks when markup is reorganised but the page still
+works is testing the wrong thing.
 
 **What to test.** Behaviour that would be embarrassing to break: one person
 reading another's conversation, a reply lost when a stream fails, a token
 breakdown that does not add up. Not implementation detail.
+
+**Coverage must be 100%**, both halves, enforced in CI. Lines, branches and
+functions.
+
+This is not a claim that the code is correct — it can be fully covered and
+still wrong. What it buys is that untested code cannot arrive unnoticed, and
+that anything unreachable has to be dealt with rather than ignored. It found
+dead code the first time it ran: `store.conversation_cost` was written,
+documented and called by nothing.
+
+When a line cannot be reached, prefer restructuring so the branch does not
+exist over marking it exempt. `buffer.split("\n\n").pop() ?? ""` could never
+take the fallback, because `split` always returns at least one element; it
+was rewritten as an index rather than excluded from the count.
+
+The exemptions that do exist are listed in `pyproject.toml` and
+`vite.config.ts`, and each one says why.
 
 ---
 
@@ -228,9 +250,44 @@ Three workflows, split so a change only runs the checks it can affect:
 
 | Workflow | Runs when | Does |
 |---|---|---|
-| `backend.yml` | `app/`, `tests/`, `migrations/`, requirements change | ruff, pytest against a real Postgres, a startup check |
-| `frontend.yml` | `web/` changes | lint, then build — which type-checks |
+| `backend.yml` | `app/`, `tests/`, `migrations/`, requirements change | ruff lint, `ruff format --check`, pytest at 100% coverage against a real Postgres, a startup check |
+| `frontend.yml` | `web/` changes | Biome lint and format, Vitest at 100% coverage, then build — which type-checks |
 | `codeql.yml` | **always** | security analysis |
+
+**Formatting is checked, not applied.** `ruff format --check` and `biome
+check` report differences and fail; neither rewrites anything. CI quietly
+fixing formatting would leave the branch different from what was reviewed.
+
+**Biome does linting and formatting for the client** — one tool rather than
+a linter and a formatter disagreeing with each other. Where a rule is broken
+deliberately, the `biome-ignore` comment must give the reason, and there are
+exactly three: `dangerouslySetInnerHTML` on sanitised output, `autoFocus` on
+the only input on the page, and the scroll effect's dependencies.
+
+**It looks at `src/` only.** Configuration files belong to the tools that
+generate and read them — Vite writes the tsconfigs, npm writes the lockfile
+— and reformatting those to our taste produces noisy diffs and CI failures
+over files nobody edited. It also reads `.gitignore`, so generated output
+such as a coverage report is never scanned.
+
+**Thresholds live in config, not in the workflow**, so `pytest --cov` and
+`npm run test:coverage` locally enforce precisely what CI does.
+
+**Coverage is reported on the pull request**, as a table posted by the job
+itself. It edits its own previous comment rather than adding another on each
+push, found by a hidden marker in the body — otherwise a busy pull request
+fills with stale tables. The full browsable report is kept as an artifact
+for a fortnight.
+
+Those steps run with `if: always()`, because a coverage report is most
+useful precisely when the threshold has just failed.
+
+**The check name is `<workflow> / <job key>`.** GitHub appends the event.
+The job keys are `verify` in both workflows, so the list reads
+`Backend / verify` and `Frontend / verify`.
+
+**`pull-requests: write` is granted per job**, not to the whole workflow,
+and only to the two that post a comment.
 
 **CodeQL is deliberately unfiltered.** The branch ruleset requires a code
 scanning result, and a workflow skipped by a path filter never reports one,
@@ -273,11 +330,6 @@ this later", no narration of the process. Comments describe the software.
 
 Honest list of where the code does not match the above.
 
-- **The client does not follow the component layout.** Components sit flat
-  in `components/`, hooks flat in `hooks/`, and `markdown.ts`, `api.ts` and
-  `types.ts` sit at `src/` root rather than in `shared/`.
-- **There are no frontend tests, and no test runner installed.** The
-  frontend CI job lints and builds only.
 - **CodeQL scans Python only.** TypeScript scanning is worth adding — the
   client renders model output as HTML — but it cannot be merged normally;
   see the note under CI.

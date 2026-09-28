@@ -19,5 +19,8 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["vite.config.ts"]
+  // vitest.setup.ts belongs here rather than with the application: it
+  // imports from node:stream and node:util, and the app config has no Node
+  // types on purpose — so browser code cannot quietly reach for them.
+  "include": ["vite.config.ts", "vitest.setup.ts"]
 }

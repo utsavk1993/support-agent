@@ -108,13 +108,19 @@ change, so the file would no longer describe what is deployed.
 
 ## Configuration
 
-| Setting | Where | Default |
+Everything is read in `app/config.py`, and a missing required setting stops
+the process at startup with a message naming the fix.
+
+| Setting | Required | Default |
 |---|---|---|
-| Model | `llm.py` | `nvidia/nemotron-3-super-120b-a12b` |
-| Request timeout | `llm.py` | 60s |
-| `NVIDIA_API_KEY` | `.env` | — |
-| `DATABASE_URL` | `.env` | local Postgres on 5433 |
-| `SECRET_KEY` | `.env` | signs the session cookie |
+| `NVIDIA_API_KEY` | yes | — |
+| `DATABASE_URL` | yes | — |
+| `SECRET_KEY` | yes | signs the session cookie |
+| `MODEL` | no | `nvidia/nemotron-3-super-120b-a12b` |
+| `REQUEST_TIMEOUT` | no | 60s |
+| `MAX_REPLY_TOKENS` | no | 1024 |
+| `DATABASE_POOL_SIZE` | no | 10 |
+| `COOKIE_HTTPS_ONLY` | no | `false` — set `true` in production |
 
 `SECRET_KEY` must stay stable across restarts. Changing it invalidates every
 existing session, which on a deploy means every visitor loses their
@@ -134,31 +140,42 @@ uvicorn app.main:app --reload   # terminal one — the API, on :8000
 npm --prefix web run dev        # terminal two — the client, on :5173
 ```
 
-Open <http://127.0.0.1:5173>. Vite forwards anything under `/api` to the
-Python server, so the browser sees a single origin and there is no CORS to
-configure.
+Open <http://localhost:5173> — `localhost`, not `127.0.0.1`, since Vite
+binds to IPv6 and the numeric address will not reach it. Vite forwards
+anything under `/api` to the Python server, so the browser sees a single
+origin and there is no CORS to configure.
 
 In production there is only one server: `npm run build` writes the client
 into `static/`, and FastAPI serves it.
 
 ```
 web/src/
-  api.ts               requests, and parsing the event stream
-  types.ts             the five shapes an event can take
-  markdown.ts          markdown to HTML, via a sanitiser
-  hooks/useChat.ts     conversation state and streaming
-  components/          one file per piece of the interface
+  shared/              api, types and markdown — used by more than one thing
+  hooks/useChat/       conversation state and streaming
+  components/<Name>/   one folder per component, tests beside it
 ```
 
 ## Development
 
 ```bash
 pip install -r requirements-dev.txt
-ruff check .
-pytest -q
+ruff check .                      # lint
+ruff format .                     # format
+pytest -q --cov                   # tests, and the 100% coverage gate
 
-npm --prefix web run build   # TypeScript is type-checked as it builds
+npm --prefix web run lint         # Biome: lint and formatting
+npm --prefix web run format       # Biome, writing fixes
+npm --prefix web run test:coverage
+npm --prefix web run build        # type-checks as it builds
 ```
+
+**Coverage must be 100% on both halves**, and the thresholds live in
+`pyproject.toml` and `vite.config.ts` rather than in the workflows — so the
+commands above enforce exactly what CI does.
+
+That is not a claim of correctness; code can be fully covered and still
+wrong. It means untested code cannot arrive unnoticed, and that anything
+unreachable has to be dealt with rather than ignored.
 
 Tests stub the model call, so they need no API key, make no network requests
 and cost nothing. They do use a real Postgres rather than a stand-in, since
@@ -173,9 +190,16 @@ CI is split so a change only runs the checks it can affect:
 
 | Workflow | Runs when | Does |
 |---|---|---|
-| Backend | `app/`, `tests/`, `migrations/`, requirements change | ruff, pytest against a real Postgres, a startup check |
-| Frontend | `web/` changes | oxlint, then a build — which type-checks |
-| CodeQL | **always** | security analysis of Python and TypeScript |
+| Backend | `app/`, `tests/`, `migrations/`, requirements change | ruff lint and format check, pytest at 100% coverage against a real Postgres, a startup check |
+| Frontend | `web/` changes | Biome lint and format, Vitest at 100% coverage, then a build — which type-checks |
+| CodeQL | **always** | security analysis |
+
+Formatting is checked rather than applied. CI quietly reformatting would
+leave the branch different from what was reviewed.
+
+Each half posts its coverage table as a comment on the pull request, editing
+its own previous comment rather than adding another on every push. The full
+browsable report is attached to the run as an artifact.
 
 CodeQL is deliberately unfiltered. A merge requires a code scanning result,
 and a workflow skipped by a path filter never reports one — so filtering it

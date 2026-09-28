@@ -4,7 +4,11 @@
     "target": "es2023",
     "lib": ["ES2023", "DOM"],
     "module": "esnext",
-    "types": ["vite/client"],
+    // vitest/globals gives `describe` and `it` without importing them;
+    // jest-dom gives the DOM matchers the setup file installs. Both are
+    // needed here because tests are type-checked with the application
+    // rather than being exempt from it.
+    "types": ["vite/client", "vitest/globals", "@testing-library/jest-dom"],
     "allowArbitraryExtensions": true,
     "skipLibCheck": true,
 

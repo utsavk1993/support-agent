@@ -18,6 +18,7 @@ from app import llm
 @pytest.fixture(autouse=True)
 def no_waiting(monkeypatch):
     """Skip the backoff, so these run instantly instead of over four seconds."""
+
     async def instant(seconds):
         return
 
@@ -39,6 +40,7 @@ def status_error(cls, code):
 
 
 # --- the bug this file exists for -------------------------------------------
+
 
 def test_a_bare_api_error_is_retried():
     """The failure that used to be reported to the user without a single retry."""
@@ -71,11 +73,15 @@ def test_a_provider_that_stays_broken_eventually_gives_up():
 
 # --- our own mistakes must not be retried -----------------------------------
 
-@pytest.mark.parametrize("error", [
-    status_error(BadRequestError, 400),
-    status_error(AuthenticationError, 401),
-    status_error(NotFoundError, 404),
-])
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        status_error(BadRequestError, 400),
+        status_error(AuthenticationError, 401),
+        status_error(NotFoundError, 404),
+    ],
+)
 def test_permanent_failures_fail_immediately(error):
     """Retrying a bad key or a typo only delays the real problem."""
     attempts = {"n": 0}
@@ -92,6 +98,7 @@ def test_permanent_failures_fail_immediately(error):
 
 # --- the retry has to reach the first chunk ---------------------------------
 
+
 def test_a_stream_that_fails_on_its_first_read_is_retried(monkeypatch):
     """Where a busy provider actually reports itself.
 
@@ -107,18 +114,19 @@ def test_a_stream_that_fails_on_its_first_read_is_retried(monkeypatch):
 
     class Stream:
         """Fails on the first read the first two times it is opened."""
+
         def __aiter__(self):
             async def chunks():
                 if attempts["n"] < 3:
                     raise api_error()
                 yield chunk(content="it worked")
-                yield SimpleNamespace(choices=[], usage=SimpleNamespace(
-                    prompt_tokens=10, completion_tokens=2, total_tokens=12))
+                yield SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=10, completion_tokens=2, total_tokens=12))
+
             return chunks()
 
     async def create(**kwargs):
         attempts["n"] += 1
-        return Stream()          # opening always succeeds
+        return Stream()  # opening always succeeds
 
     monkeypatch.setattr(llm.client.chat.completions, "create", create)
 
@@ -133,6 +141,7 @@ def test_a_stream_that_fails_on_its_first_read_is_retried(monkeypatch):
 
 def test_the_first_chunk_is_not_lost_when_it_succeeds(monkeypatch):
     """Fetching a chunk early to test it must not swallow it."""
+
     def chunk(content):
         delta = SimpleNamespace(content=content, reasoning_content=None)
         return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=None)
@@ -142,6 +151,7 @@ def test_the_first_chunk_is_not_lost_when_it_succeeds(monkeypatch):
             async def chunks():
                 yield chunk("first ")
                 yield chunk("second")
+
             return chunks()
 
     async def create(**kwargs):
@@ -154,3 +164,101 @@ def test_the_first_chunk_is_not_lost_when_it_succeeds(monkeypatch):
 
     texts = [p["text"] for p in asyncio.run(collect()) if p["type"] == "text"]
     assert "".join(texts) == "first second"
+
+
+def test_chat_sends_a_single_request_and_returns_it(monkeypatch):
+    """`chat()` is the non-streaming path, used when nobody is waiting
+    word by word — summarising an old conversation, for instance."""
+    sent = {}
+
+    async def create(**kwargs):
+        sent.update(kwargs)
+        return "the response"
+
+    monkeypatch.setattr(llm.client.chat.completions, "create", create)
+
+    assert asyncio.run(llm.chat(model="x", messages=[])) == "the response"
+    assert sent["model"] == "x"
+    assert "stream" not in sent, "chat() is the non-streaming path"
+
+
+def test_no_reasoning_means_no_thinking_tokens(monkeypatch):
+    """A reply the model produced without reasoning first.
+
+    The split is worked out from how much of the output was reasoning, so
+    with none of it the whole figure belongs to the answer — and the
+    division that would compute it must not run on zero.
+    """
+
+    def chunk(content=None, usage=None):
+        delta = SimpleNamespace(content=content, reasoning_content=None)
+        return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=usage)
+
+    class Stream:
+        def __aiter__(self):
+            async def chunks():
+                yield chunk(content="straight to the answer")
+                yield SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=10, completion_tokens=8, total_tokens=18))
+
+            return chunks()
+
+    async def create(**kwargs):
+        return Stream()
+
+    monkeypatch.setattr(llm.client.chat.completions, "create", create)
+
+    async def collect():
+        return [piece async for piece in llm.stream(model="x", messages=[])]
+
+    usage = asyncio.run(collect())[-1]
+    assert usage["thinking_tokens"] == 0
+    assert usage["answer_tokens"] == 8
+
+
+def test_a_stream_that_yields_nothing_at_all(monkeypatch):
+    """The provider closes the connection without sending a single chunk."""
+
+    class Empty:
+        def __aiter__(self):
+            async def chunks():
+                return
+                yield  # pragma: no cover - makes this an async generator
+
+            return chunks()
+
+    async def create(**kwargs):
+        return Empty()
+
+    monkeypatch.setattr(llm.client.chat.completions, "create", create)
+
+    async def collect():
+        return [piece async for piece in llm.stream(model="x", messages=[])]
+
+    assert asyncio.run(collect()) == []
+
+
+def test_usage_with_nothing_written_at_all(monkeypatch):
+    """The provider reports what it billed, having produced no output.
+
+    With no characters to measure, there is no proportion to split by —
+    and the division that would compute one must not run on zero.
+    """
+
+    class Stream:
+        def __aiter__(self):
+            async def chunks():
+                yield SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=684, completion_tokens=0, total_tokens=684))
+
+            return chunks()
+
+    async def create(**kwargs):
+        return Stream()
+
+    monkeypatch.setattr(llm.client.chat.completions, "create", create)
+
+    async def collect():
+        return [piece async for piece in llm.stream(model="x", messages=[])]
+
+    usage = asyncio.run(collect())[-1]
+    assert usage["thinking_tokens"] == 0
+    assert usage["answer_tokens"] == 0

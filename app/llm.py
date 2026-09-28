@@ -58,11 +58,11 @@ client = AsyncOpenAI(
 # Listing the permanent ones cannot fail that way. A new kind of transient
 # error gets retried by default, which is the safer way to be wrong.
 PERMANENT = (
-    BadRequestError,          # 400 — malformed; sending it again is pointless
-    AuthenticationError,      # 401 — wrong key; needs a human
-    PermissionDeniedError,    # 403 — not allowed; needs a human
-    NotFoundError,            # 404 — no such model; a typo
-    UnprocessableEntityError, # 422 — the request made no sense
+    BadRequestError,  # 400 — malformed; sending it again is pointless
+    AuthenticationError,  # 401 — wrong key; needs a human
+    PermissionDeniedError,  # 403 — not allowed; needs a human
+    NotFoundError,  # 404 — no such model; a typo
+    UnprocessableEntityError,  # 422 — the request made no sense
 )
 
 # Anything else the library raises. Timeouts, dropped connections, rate
@@ -79,6 +79,7 @@ MAX_ATTEMPTS = 4
 # We wait longer each time because if it needs a few seconds to recover,
 # a short fixed wait burns all our tries before it's ready.
 BACKOFF_BASE = 0.6
+
 
 async def _with_retry(attempt_once, what: str):
     """Run something, and try again if it fails for a silly reason.
@@ -121,8 +122,7 @@ async def _with_retry(attempt_once, what: str):
 
             # Say it out loud. Silent retries make things feel mysteriously
             # slow and teach you nothing.
-            print(f"  [retry {attempt}/{MAX_ATTEMPTS - 1}] {what}: "
-                  f"{type(e).__name__} - waiting {delay:.1f}s")
+            print(f"  [retry {attempt}/{MAX_ATTEMPTS - 1}] {what}: {type(e).__name__} - waiting {delay:.1f}s")
 
             # THE MOST IMPORTANT LINE IN THIS FILE.
             #
@@ -157,9 +157,7 @@ async def chat(**kwargs):
     paused waiting for the model, the server is free to serve other people
     instead of sitting idle. Because it can pause, callers write `await`.
     """
-    return await _with_retry(
-        lambda: client.chat.completions.create(**kwargs), "request"
-    )
+    return await _with_retry(lambda: client.chat.completions.create(**kwargs), "request")
 
 
 async def stream(**kwargs):
