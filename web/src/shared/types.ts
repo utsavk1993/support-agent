@@ -53,17 +53,23 @@ export interface ErrorEvent {
   message: string;
 }
 
-export type StreamEvent =
-  | ConversationEvent
-  | ThinkingEvent
-  | TextEvent
-  | UsageEvent
-  | ErrorEvent;
+export type StreamEvent = ConversationEvent | ThinkingEvent | TextEvent | UsageEvent | ErrorEvent;
 
 export type Usage = Omit<UsageEvent, "type">;
 
 /** One message on screen. */
 export interface Message {
+  /**
+   * Stable identity for React's list rendering.
+   *
+   * Keying on array position instead looks fine for an append-only list,
+   * but the last message here is rewritten on every streamed chunk, and a
+   * positional key invites React to reuse the wrong node when that happens.
+   *
+   * Optional because a restored conversation arrives from the server
+   * without one; the hook assigns them on load.
+   */
+  id?: string;
   role: "user" | "assistant";
   content: string;
   /** The model's scratchpad. Live only — it is not stored, so it does not survive a refresh. */

@@ -31,9 +31,14 @@ async function* readEvents(body: ReadableStream<Uint8Array>): AsyncGenerator<Str
     buffer += decoder.decode(value, { stream: true });
 
     // A blank line ends an event. Whatever follows the last one is
-    // incomplete, so it stays in the buffer.
-    const blocks = buffer.split("\n\n");
-    buffer = blocks.pop() ?? "";
+    // incomplete, so it stays in the buffer for the next read.
+    //
+    // Written as an index rather than `blocks.pop() ?? ""` because split()
+    // always returns at least one element, so the fallback could never run
+    // — and an unreachable branch is a branch nothing can ever test.
+    const parts = buffer.split("\n\n");
+    const blocks = parts.slice(0, -1);
+    buffer = parts[parts.length - 1];
 
     for (const block of blocks) {
       if (!block.startsWith("data: ")) continue;

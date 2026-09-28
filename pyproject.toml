@@ -11,6 +11,21 @@ select = [
     "B",    # likely bugs
 ]
 
+[tool.coverage.run]
+source = ["app"]
+
+[tool.coverage.report]
+# Every line. Not a quality guarantee — code can be fully covered and still
+# wrong — but untested code cannot arrive unnoticed, and anything genuinely
+# unreachable has to be justified here rather than quietly ignored.
+fail_under = 100
+show_missing = true
+exclude_also = [
+    # A bare `yield` after a `return` or `raise`, which exists only to make
+    # a function an async generator. It is unreachable by construction.
+    "^\\s*yield$",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Put the project root on the import path, so tests can `import main`.

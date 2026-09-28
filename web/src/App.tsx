@@ -1,14 +1,16 @@
 import { useEffect, useRef } from "react";
 
-import { Composer } from "./components/Composer";
-import { MessageBubble } from "./components/MessageBubble";
-import { useChat } from "./hooks/useChat";
+import { Composer } from "./components/Composer/Composer";
+import { MessageBubble } from "./components/MessageBubble/MessageBubble";
+import { useChat } from "./hooks/useChat/useChat";
 
 export default function App() {
   const { messages, send, sending, restoring } = useChat();
   const scroller = useRef<HTMLDivElement>(null);
 
-  // Follow the reply as it grows.
+  // Follow the reply as it grows. The ref is stable and never a dependency;
+  // `messages` is the trigger we want.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: messages is the intended trigger
   useEffect(() => {
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
   }, [messages]);
@@ -30,8 +32,8 @@ export default function App() {
             </div>
           )}
 
-          {messages.map((message, index) => (
-            <MessageBubble key={index} message={message} />
+          {messages.map((message) => (
+            <MessageBubble key={message.id} message={message} />
           ))}
         </div>
       </div>

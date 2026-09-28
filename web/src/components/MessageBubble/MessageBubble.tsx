@@ -1,7 +1,7 @@
-import { renderMarkdown } from "../markdown";
-import type { Message } from "../types";
-import { ThinkingBlock } from "./ThinkingBlock";
-import { UsageLine } from "./UsageLine";
+import { renderMarkdown } from "../../shared/markdown";
+import type { Message } from "../../shared/types";
+import { ThinkingBlock } from "../ThinkingBlock/ThinkingBlock";
+import { UsageLine } from "../UsageLine/UsageLine";
 
 export function MessageBubble({ message }: { message: Message }) {
   const isAssistant = message.role === "assistant";
@@ -14,9 +14,14 @@ export function MessageBubble({ message }: { message: Message }) {
         )}
 
         {isAssistant ? (
-          // Replies are markdown, rendered through a sanitiser. See
-          // markdown.ts for why that second step is not optional.
-          <div className="body" dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }} />
+          // The reply is markdown and has to become HTML. renderMarkdown
+          // runs it through DOMPurify first, which is the whole reason that
+          // module exists — see shared/markdown.ts and its tests.
+          <div
+            className="body"
+            // biome-ignore lint/security/noDangerouslySetInnerHtml: sanitised in renderMarkdown
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }}
+          />
         ) : (
           // What the customer typed is plain text and must never be treated
           // as markup. React escapes it for us; `white-space: pre-wrap` in

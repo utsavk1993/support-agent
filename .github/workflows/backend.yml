@@ -16,8 +16,15 @@ on:
       - ".github/workflows/backend.yml"
 
 jobs:
-  check:
+  # The job key becomes the check name: "Backend / verify".
+  verify:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      # Needed to post the coverage table onto the pull request. Granted
+      # here rather than to the whole workflow, so only this job has it.
+      pull-requests: write
 
     env:
       # The model client is built at import time and refuses to exist without
@@ -49,9 +56,9 @@ jobs:
           --health-retries 10
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -62,8 +69,91 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      - name: Check formatting
+        # --check reports what differs without rewriting anything, so CI
+        # fails on unformatted code rather than quietly fixing it and
+        # leaving the branch different from what was reviewed.
+        run: ruff format --check .
+
       - name: Test
-        run: pytest -q
+        # The 100% threshold lives in pyproject.toml, so running the suite
+        # locally enforces exactly what CI does. Below 100 this fails, and
+        # the two steps after it still run because of `if: always()` — a
+        # report is most useful when something is wrong.
+        run: pytest -q --cov --cov-report=term --cov-report=html --cov-report=json
+
+      - name: Build the coverage table
+        if: always()
+        # One table, written to a file, then used twice: on the run's
+        # summary page and as a comment on the pull request.
+        run: |
+          python - <<'PY' > coverage-table.md
+          import json, pathlib
+
+          # A hidden marker, so the next run can find this comment and edit
+          # it instead of adding another one.
+          print("<!-- coverage:backend -->")
+
+          report = pathlib.Path("coverage.json")
+          if not report.is_file():
+              print("### Backend coverage\n\nThe test run produced no report.")
+              raise SystemExit
+
+          data = json.loads(report.read_text())
+          total = data["totals"]["percent_covered_display"]
+          ok = total == "100"
+
+          print(f"### Backend coverage — {'✅' if ok else '❌'} {total}%\n")
+          if not ok:
+              print("Below the 100% this project requires.\n")
+
+          print("| File | Coverage | Uncovered lines |")
+          print("|---|--:|---|")
+          for name, file in sorted(data["files"].items()):
+              pct = file["summary"]["percent_covered_display"]
+              missing = file["missing_lines"]
+              shown = ", ".join(map(str, missing[:8])) + ("…" if len(missing) > 8 else "")
+              mark = "" if pct == "100" else " ⚠️"
+              print(f"| `{name}` | {pct}%{mark} | {shown or '—'} |")
+          PY
+
+          cat coverage-table.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on the pull request
+        if: always() && github.event_name == 'pull_request'
+        # Edits its own previous comment rather than adding a new one each
+        # push, so a busy pull request does not fill up with stale tables.
+        #
+        # Skipped for pull requests from forks, where the token is
+        # read-only and posting would fail.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          existing=$(gh api "repos/$REPO/issues/$PR/comments" \
+            --jq 'map(select(.body | contains("<!-- coverage:backend -->"))) | .[0].id // empty')
+
+          if [ -n "$existing" ]; then
+            gh api --method PATCH "repos/$REPO/issues/comments/$existing" \
+              -F body=@coverage-table.md > /dev/null
+            echo "updated comment $existing"
+          else
+            gh api --method POST "repos/$REPO/issues/$PR/comments" \
+              -F body=@coverage-table.md > /dev/null
+            echo "posted a new comment"
+          fi
+
+      - name: Keep the full report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: backend-coverage
+          # The browsable HTML version, for when the summary is not enough
+          # to see which line is uncovered.
+          path: htmlcov/
+          retention-days: 14
 
       - name: Check the app actually starts
         # Lint and tests both run against imported code. This catches the

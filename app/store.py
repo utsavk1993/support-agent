@@ -80,10 +80,7 @@ async def _migrate() -> None:
             )
         """)
 
-        applied = {
-            row["filename"]
-            for row in await connection.fetch("SELECT filename FROM schema_migrations")
-        }
+        applied = {row["filename"] for row in await connection.fetch("SELECT filename FROM schema_migrations")}
 
         for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
             if path.name in applied:
@@ -93,9 +90,7 @@ async def _migrate() -> None:
             # halfway leaves the schema untouched rather than half-changed.
             async with connection.transaction():
                 await connection.execute(path.read_text())
-                await connection.execute(
-                    "INSERT INTO schema_migrations (filename) VALUES ($1)", path.name
-                )
+                await connection.execute("INSERT INTO schema_migrations (filename) VALUES ($1)", path.name)
             print(f"[migration] applied {path.name}")
 
 
@@ -106,7 +101,8 @@ async def create_conversation(conversation_id: str, owner_id: str) -> None:
     """Start a new conversation belonging to someone."""
     await pool().execute(
         "INSERT INTO conversations (id, owner_id) VALUES ($1, $2)",
-        conversation_id, owner_id,
+        conversation_id,
+        owner_id,
     )
 
 
@@ -119,7 +115,8 @@ async def conversation_belongs_to(conversation_id: str, owner_id: str) -> bool:
     """
     row = await pool().fetchrow(
         "SELECT 1 FROM conversations WHERE id = $1 AND owner_id = $2",
-        conversation_id, owner_id,
+        conversation_id,
+        owner_id,
     )
     return row is not None
 
@@ -134,7 +131,8 @@ async def load_messages(conversation_id: str, owner_id: str) -> list[dict]:
         WHERE m.conversation_id = $1 AND c.owner_id = $2
         ORDER BY m.id
         """,
-        conversation_id, owner_id,
+        conversation_id,
+        owner_id,
     )
     return [{"role": row["role"], "content": row["content"]} for row in rows]
 
@@ -157,7 +155,8 @@ async def load_transcript(conversation_id: str, owner_id: str) -> list[dict]:
         WHERE m.conversation_id = $1 AND c.owner_id = $2
         ORDER BY m.id
         """,
-        conversation_id, owner_id,
+        conversation_id,
+        owner_id,
     )
 
     transcript = []
@@ -200,7 +199,9 @@ async def add_message(
                     prompt_tokens, completion_tokens, thinking_tokens, answer_tokens
                 ) VALUES ($1, $2, $3, $4, $5, $6, $7)
                 """,
-                conversation_id, role, content,
+                conversation_id,
+                role,
+                content,
                 usage.get("prompt_tokens"),
                 usage.get("completion_tokens"),
                 usage.get("thinking_tokens"),
@@ -210,26 +211,3 @@ async def add_message(
                 "UPDATE conversations SET updated_at = now() WHERE id = $1",
                 conversation_id,
             )
-
-
-async def conversation_cost(conversation_id: str, owner_id: str) -> dict:
-    """What this conversation has cost in tokens so far.
-
-    The reason token counts are stored rather than only displayed: this is a
-    question you can answer, not estimate.
-    """
-    row = await pool().fetchrow(
-        """
-        SELECT
-            count(*) FILTER (WHERE m.role = 'assistant') AS replies,
-            coalesce(sum(m.prompt_tokens), 0)     AS prompt_tokens,
-            coalesce(sum(m.completion_tokens), 0) AS completion_tokens,
-            coalesce(sum(m.thinking_tokens), 0)   AS thinking_tokens,
-            coalesce(sum(m.answer_tokens), 0)     AS answer_tokens
-        FROM messages m
-        JOIN conversations c ON c.id = m.conversation_id
-        WHERE m.conversation_id = $1 AND c.owner_id = $2
-        """,
-        conversation_id, owner_id,
-    )
-    return dict(row) if row else {}

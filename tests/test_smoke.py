@@ -32,11 +32,7 @@ def send(client, message="restocking fee?", conversation_id=None):
 
 def read_events(response):
     """Pull the JSON objects out of a Server-Sent Events response body."""
-    return [
-        json.loads(block[6:])
-        for block in response.text.split("\n\n")
-        if block.startswith("data: ")
-    ]
+    return [json.loads(block[6:]) for block in response.text.split("\n\n") if block.startswith("data: ")]
 
 
 def reply_events(response):
@@ -61,7 +57,7 @@ def test_a_missing_client_explains_itself(client, tmp_path, monkeypatch):
     and the backend CI job deliberately does not build the client, so this
     is the state it runs in.
     """
-    monkeypatch.setattr(main.config, "STATIC_DIR", tmp_path)   # empty
+    monkeypatch.setattr(main.config, "STATIC_DIR", tmp_path)  # empty
 
     response = client.get("/")
     assert response.status_code == 503
@@ -77,9 +73,7 @@ def test_reply_arrives_in_pieces(client):
     texts = [e for e in reply_events(response) if e["type"] == "text"]
 
     assert len(texts) > 1, "a single event means it is not really streaming"
-    assert "".join(t["text"] for t in texts) == (
-        "A used power tool carries a 15% restocking fee."
-    )
+    assert "".join(t["text"] for t in texts) == ("A used power tool carries a 15% restocking fee.")
 
 
 def test_usage_arrives_last(client):
@@ -93,12 +87,12 @@ def test_usage_arrives_last(client):
     # The displayed breakdown has to add up to the billed total, or the
     # numbers under each reply are quietly wrong.
     assert usage["thinking_tokens"] + usage["answer_tokens"] == usage["completion_tokens"]
-    assert (usage["prompt_tokens"] + usage["thinking_tokens"]
-            + usage["answer_tokens"]) == usage["total_tokens"]
+    assert (usage["prompt_tokens"] + usage["thinking_tokens"] + usage["answer_tokens"]) == usage["total_tokens"]
 
 
 def test_failure_before_the_reply_starts_is_a_normal_http_error(client, monkeypatch):
     """Nothing sent yet, so we can still use a status code."""
+
     async def refuses_to_start(**kwargs):
         raise RuntimeError("provider is down")
         yield  # pragma: no cover - makes this an async generator
@@ -138,12 +132,15 @@ def test_policy_is_sent_as_the_first_message(client, monkeypatch):
     assert first["content"] == SUPPORT_POLICY
 
 
-@pytest.mark.parametrize("bad_body", [
-    {"message": ""},              # empty message
-    {"message": 1},               # not a string
-    {"message": "x" * 5000},      # beyond the length cap
-    {"nonsense": True},           # wrong shape entirely
-])
+@pytest.mark.parametrize(
+    "bad_body",
+    [
+        {"message": ""},  # empty message
+        {"message": 1},  # not a string
+        {"message": "x" * 5000},  # beyond the length cap
+        {"nonsense": True},  # wrong shape entirely
+    ],
+)
 def test_malformed_requests_are_rejected(client, bad_body):
     assert client.post("/api/chat", json=bad_body).status_code == 422
 
@@ -153,13 +150,16 @@ def test_chat_request_requires_a_message():
         routes.ChatRequest(conversation_id="abc")
 
 
-@pytest.mark.parametrize("fact", [
-    "15% restocking fee",
-    "30 days",
-    "3-year limited warranty",
-    "75 dollars",
-    "Never invent an exception",
-])
+@pytest.mark.parametrize(
+    "fact",
+    [
+        "15% restocking fee",
+        "30 days",
+        "3-year limited warranty",
+        "75 dollars",
+        "Never invent an exception",
+    ],
+)
 def test_policy_contains_key_facts(fact):
     assert fact in SUPPORT_POLICY
 
@@ -190,9 +190,7 @@ def test_requests_are_handled_concurrently(monkeypatch, clean_db):
             async with httpx.AsyncClient(transport=transport, base_url="http://test") as sender:
                 body = {"message": "hi"}
                 started = time.perf_counter()
-                responses = await asyncio.gather(
-                    *[sender.post("/api/chat", json=body) for _ in range(requests)]
-                )
+                responses = await asyncio.gather(*[sender.post("/api/chat", json=body) for _ in range(requests)])
                 return time.perf_counter() - started, responses
         finally:
             await store.disconnect()
@@ -201,9 +199,18 @@ def test_requests_are_handled_concurrently(monkeypatch, clean_db):
 
     assert all(r.status_code == 200 for r in responses)
 
-    # One after another would be 50 x 0.2s = 10s. Overlapping should land
-    # near 0.2s; allow generous headroom so a slow CI runner doesn't flake.
-    assert elapsed < delay * 5, f"{requests} requests took {elapsed:.2f}s — they queued"
+    # The question is whether these overlapped, not how fast the machine is.
+    #
+    # One after another would be 50 x 0.2s = 10s. Overlapping lands near
+    # 0.2s locally, but a shared CI runner can take several times that under
+    # load — this failed at 1.19s against a 1.0s bound, which proved nothing
+    # about concurrency and everything about the runner.
+    #
+    # So the bound is stated relative to the sequential time. Finishing in
+    # under a quarter of it cannot happen unless the requests overlapped,
+    # and leaves room for a slow machine.
+    sequential = requests * delay
+    assert elapsed < sequential / 4, f"{requests} requests took {elapsed:.2f}s; sequential would be {sequential:.0f}s — they queued"
 
 
 def test_reasoning_is_labelled_separately_from_the_reply(client):
@@ -234,6 +241,7 @@ def test_thinking_tokens_are_estimated_from_how_much_was_reasoning(monkeypatch):
     three quarters of the output is thinking, so three quarters of the
     billed output tokens should be attributed to it.
     """
+
     def chunk(reasoning=None, content=None, usage=None):
         delta = SimpleNamespace(content=content, reasoning_content=reasoning)
         return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=usage)
@@ -241,10 +249,10 @@ def test_thinking_tokens_are_estimated_from_how_much_was_reasoning(monkeypatch):
     class Stream:
         def __aiter__(self):
             async def chunks():
-                yield chunk(reasoning="t" * 75)   # 75 characters of thinking
-                yield chunk(content="a" * 25)     # 25 characters of answer
-                yield SimpleNamespace(choices=[], usage=SimpleNamespace(
-                    prompt_tokens=500, completion_tokens=100, total_tokens=600))
+                yield chunk(reasoning="t" * 75)  # 75 characters of thinking
+                yield chunk(content="a" * 25)  # 25 characters of answer
+                yield SimpleNamespace(choices=[], usage=SimpleNamespace(prompt_tokens=500, completion_tokens=100, total_tokens=600))
+
             return chunks()
 
     async def create(**kwargs):

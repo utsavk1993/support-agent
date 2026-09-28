@@ -48,7 +48,7 @@ def create_app() -> FastAPI:
     app.add_middleware(
         SessionMiddleware,
         secret_key=config.SECRET_KEY,
-        same_site="lax",      # not sent on cross-site requests, which blocks CSRF
+        same_site="lax",  # not sent on cross-site requests, which blocks CSRF
         https_only=config.COOKIE_HTTPS_ONLY,
     )
 

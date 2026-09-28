@@ -1,4 +1,4 @@
-import type { Usage } from "../types";
+import type { Usage } from "../../shared/types";
 
 /**
  * The token counts under a reply.
@@ -19,7 +19,8 @@ export function UsageLine({ usage }: { usage: Usage }) {
       }
     >
       {usage.prompt_tokens} in + ~{usage.thinking_tokens} thinking
-      {" + ~"}{usage.answer_tokens} answer = {usage.total_tokens} total
+      {" + ~"}
+      {usage.answer_tokens} answer = {usage.total_tokens} total
     </div>
   );
 }
