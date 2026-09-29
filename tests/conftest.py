@@ -130,11 +130,26 @@ def fresh_schema():
     Dropping the tables means the migrations run for real on every test run,
     so a broken migration fails here rather than on a deploy.
     """
-    db("""
-        DROP TABLE IF EXISTS messages CASCADE;
-        DROP TABLE IF EXISTS conversations CASCADE;
-        DROP TABLE IF EXISTS schema_migrations CASCADE;
-    """)
+    # The whole schema, rather than a list of tables. A list has to be
+    # kept in step with the migrations, and when it falls behind the
+    # symptom is a confusing "relation already exists" from a migration
+    # re-running against tables the drop did not know about.
+    db("DROP SCHEMA public CASCADE; CREATE SCHEMA public;")
+
+
+@pytest.fixture
+def seeded(fresh_schema):
+    """Demo customers and orders, loaded once for the whole run.
+
+    Verification and the order tools need something to find. Loading it
+    once and truncating only the conversation tables between tests keeps
+    the suite fast.
+    """
+    import asyncio
+
+    from scripts import seed as seed_script
+
+    asyncio.run(seed_script.seed())
 
 
 @pytest.fixture
@@ -145,7 +160,10 @@ def clean_db():
     statement, and is far quicker than deleting row by row.
     """
     yield
+    # Conversations only. The demo orders are shared by every test and
+    # reloading them each time would triple the run.
     db("TRUNCATE conversations CASCADE")
+    db("TRUNCATE verification_attempts, access_log")
 
 
 # ---------------------------------------------------------------------------

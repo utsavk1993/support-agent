@@ -99,3 +99,27 @@ export async function loadConversation(id: string): Promise<Message[] | null> {
   const data = await response.json();
   return data.messages as Message[];
 }
+
+/** Open a return the assistant proposed. Nothing happens until this runs. */
+export async function confirmReturn(
+  conversationId: string,
+  orderNumber: string,
+  itemId: number,
+  reason: string,
+): Promise<{ return_id: string }> {
+  const response = await fetch("/api/returns", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      conversation_id: conversationId,
+      order_number: orderNumber,
+      item_id: itemId,
+      reason,
+    }),
+  });
+
+  if (!response.ok) {
+    throw new HttpError(response.status, "That return could not be opened.");
+  }
+  return response.json();
+}

@@ -174,7 +174,8 @@ def test_the_question_survives_a_model_failure(visitor, monkeypatch):
 
     monkeypatch.setattr(llm, "stream", lambda **kwargs: refuses())
 
-    assert send(visitor, "a question that fails").status_code == 502
+    # Reported inside the stream now, not as a status code.
+    assert send(visitor, "a question that fails").status_code == 200
 
     rows = db("SELECT content FROM messages ORDER BY id DESC LIMIT 1")
     assert rows[0]["content"] == "a question that fails"

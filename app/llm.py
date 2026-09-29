@@ -7,6 +7,7 @@ or changing how we handle failures is a change to ONE file.
 """
 
 import asyncio  # Pauses between retries WITHOUT freezing everyone else. See the note further down.
+import json  # Tool call arguments arrive as a JSON string.
 import random  # Adds a random bit to the retry wait, so every copy of the app doesn't retry at the same instant.
 
 from openai import (
@@ -160,6 +161,20 @@ async def chat(**kwargs):
     return await _with_retry(lambda: client.chat.completions.create(**kwargs), "request")
 
 
+def _parse_arguments(raw: str) -> dict:
+    """Turn a tool call's arguments into a dict, or say why not.
+
+    Models occasionally emit malformed JSON, and a stream cut short leaves
+    a half-written object. Either way the tool should refuse, not the
+    server fall over.
+    """
+    try:
+        parsed = json.loads(raw or "{}")
+    except json.JSONDecodeError:
+        return {"__unparsable__": raw}
+    return parsed if isinstance(parsed, dict) else {"__unparsable__": raw}
+
+
 async def stream(**kwargs):
     """Send a request and hand back the reply in pieces, as it is written.
 
@@ -172,9 +187,10 @@ async def stream(**kwargs):
     Each piece is a small dictionary, so callers never deal with the
     provider's own chunk format:
 
-        {"type": "thinking", "text": "User wants the fee for"}
-        {"type": "text",     "text": "The restocking"}
-        {"type": "usage",    "prompt_tokens": 689, ...}
+        {"type": "thinking",   "text": "User wants the fee for"}
+        {"type": "text",       "text": "The restocking"}
+        {"type": "tool_calls", "calls": [{"id": ..., "name": ..., "arguments": {...}}]}
+        {"type": "usage",      "prompt_tokens": 689, ...}
 
     Thinking pieces come first, while the model works out what to say. Text
     pieces follow. The usage piece arrives once, at the very end.
@@ -226,6 +242,21 @@ async def stream(**kwargs):
     thinking_chars = 0
     answer_chars = 0
 
+    # Tool calls arrive in PIECES, which is the awkward part of streaming
+    # them. A non-streamed reply hands over a finished call; a streamed one
+    # delivers the name in one chunk and the arguments a few characters at
+    # a time across several more:
+    #
+    #     {"index": 0, "id": "call-abc", "function": {"name": "look_up_order"}}
+    #     {"index": 0, "function": {"arguments": "{\"order_nu"}}
+    #     {"index": 0, "function": {"arguments": "mber\": \"NW-8891\"}"}}
+    #
+    # Nothing can run until the last of those has arrived, so they are
+    # collected here by index and emitted once the stream says the model
+    # has finished asking. The index is the join key — with two calls in
+    # flight their fragments interleave.
+    pending_calls: dict[int, dict] = {}
+
     async def everything():
         """The first chunk we already fetched, then the rest."""
         if first_chunk is not None:
@@ -262,7 +293,8 @@ async def stream(**kwargs):
         # `delta` is the NEW text in this chunk, not the whole reply so far.
         # Joining every delta together gives the complete answer.
         if chunk.choices:
-            delta = chunk.choices[0].delta
+            choice = chunk.choices[0]
+            delta = choice.delta
 
             # Nemotron streams its private scratchpad separately, in
             # `reasoning_content`, before writing any of the real answer.
@@ -276,3 +308,33 @@ async def stream(**kwargs):
             if delta.content:
                 answer_chars += len(delta.content)
                 yield {"type": "text", "text": delta.content}
+
+            for fragment in getattr(delta, "tool_calls", None) or []:
+                call = pending_calls.setdefault(fragment.index, {"id": None, "name": None, "arguments": ""})
+                # Each field turns up whenever it turns up. Only the
+                # arguments are a running string; the rest arrive once.
+                if fragment.id:
+                    call["id"] = fragment.id
+                if fragment.function and fragment.function.name:
+                    call["name"] = fragment.function.name
+                if fragment.function and fragment.function.arguments:
+                    call["arguments"] += fragment.function.arguments
+
+            # "tool_calls" as a finish reason means the model has stopped
+            # to wait for us. Everything collected is now complete.
+            if choice.finish_reason == "tool_calls" and pending_calls:
+                yield {
+                    "type": "tool_calls",
+                    "calls": [
+                        {
+                            "id": call["id"],
+                            "name": call["name"],
+                            # Arguments come as a JSON string. A model can
+                            # produce one that will not parse, and that is
+                            # a tool failure rather than a crash.
+                            "arguments": _parse_arguments(call["arguments"]),
+                        }
+                        for _, call in sorted(pending_calls.items())
+                    ],
+                }
+                pending_calls = {}

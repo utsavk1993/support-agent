@@ -25,6 +25,29 @@ export interface TextEvent {
   text: string;
 }
 
+/** The assistant reaching for a tool. Shown so a pause is explicable. */
+export interface ToolEvent {
+  type: "tool";
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+/**
+ * A return the assistant is proposing.
+ *
+ * Nothing has happened yet. The customer has to press a button, which
+ * sends a separate request — the model cannot open a return, because no
+ * tool does. See app/routes.py:confirm_return.
+ */
+export interface ConfirmEvent {
+  type: "confirm";
+  awaiting_confirmation: true;
+  order_number: string;
+  item_id: number;
+  item: string;
+  reason: string;
+}
+
 /**
  * Token counts. Arrives once, at the very end.
  *
@@ -77,6 +100,12 @@ export interface Message {
   /** How long the model spent reasoning, in seconds. */
   thoughtFor?: number;
   usage?: Usage;
+  /** Tools used while producing this reply, in order. */
+  tools?: { name: string; arguments: Record<string, unknown> }[];
+  /** A return awaiting the customer's confirmation. */
+  confirm?: Omit<ConfirmEvent, "type" | "awaiting_confirmation">;
+  /** Set once the customer has confirmed, so the button cannot be pressed twice. */
+  confirmed?: string;
   /** True while this reply is still arriving. */
   streaming?: boolean;
 }

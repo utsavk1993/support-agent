@@ -10,14 +10,20 @@ different reasons: this file changes when the product does, that one when
 the infrastructure does.
 """
 
+import json
 import uuid
 
 from fastapi import APIRouter, HTTPException, Request  # Route grouping, errors, the incoming request.
 from fastapi.responses import FileResponse, StreamingResponse  # A file from disk, or a reply sent in pieces.
 from pydantic import BaseModel, Field  # Describes the shape of incoming JSON so FastAPI can check it for us.
 
-from app import config, llm, sse, store  # Our own modules.
-from app.prompts import SUPPORT_POLICY  # The rulebook the agent has to follow.
+from app import config, llm, sse, store, tools  # Our own modules.
+from app.prompts import SUPPORT_POLICY, VERIFICATION_ONLY  # What the agent is told.
+
+# How many times the model may call tools before we stop it. A model that
+# misreads a result can ask forever; the cap turns an unbounded spend into
+# a bounded failure.
+MAX_TOOL_ROUNDS = 6
 
 # A router collects endpoints so main.py can attach them in one line, rather
 # than every route needing to reach for the application object itself.
@@ -145,74 +151,125 @@ async def chat(body: ChatRequest, request: Request):
     # would lose the question whenever the answer failed.
     await store.add_message(conversation_id, "user", body.message)
 
-    # Load the conversation from the database rather than trusting the
-    # browser to send it. The policy goes first: it is instructions rather
-    # than conversation, and it never changes, so keeping it at the front
-    # lets the provider recognise a repeated prefix and charge less.
-    history = await store.load_messages(conversation_id, owner)
-    model_messages = [{"role": "system", "content": SUPPORT_POLICY}] + history
-
-    pieces = llm.stream(model=llm.MODEL, messages=model_messages, max_tokens=config.MAX_REPLY_TOKENS)
-
-    # Pull the FIRST piece before we answer the browser at all.
+    # WHICH PROMPT, AND WHICH TOOLS, DEPEND ON WHETHER THEY HAVE VERIFIED.
     #
-    # This is the whole trick for keeping error handling sane. Once we start
-    # streaming, the browser has already been told "200 OK" and we can no
-    # longer change our mind about the status code. By fetching one piece up
-    # front, a provider failure still becomes a proper 502.
-    try:
-        first_piece = await anext(pieces, None)
-    except Exception as error:
-        # Nothing sent yet, so we can still fail properly. The real error
-        # goes to our logs; the customer gets something safe, since provider
-        # errors can name internal hosts and services.
-        print(f"[chat failed] {type(error).__name__}: {error}")
-        raise HTTPException(
-            status_code=502,  # "the thing I depend on is broken"
-            detail="The assistant is unavailable right now. Please try again.",
-        ) from error
+    # An unverified conversation is not sent the support policy at all, and
+    # is not offered the tools that read customer data. It cannot disclose
+    # what it was never given, and cannot call what it was never offered.
+    #
+    # Telling the model "refuse until they verify" would be an instruction,
+    # and instructions are exactly what prompt injection argues with. This
+    # is not an instruction; it is an absence.
+    customer = await store.verified_customer(conversation_id)
+
+    system = SUPPORT_POLICY if customer else VERIFICATION_ONLY
+    if customer:
+        system += f"\n\nYou are speaking to {customer['name']}, who has verified their identity."
+
+    # Load the conversation from the database rather than trusting the
+    # browser to send it.
+    history = await store.load_messages(conversation_id, owner)
+    conversation = [{"role": "system", "content": system}] + history
 
     async def send_events():
-        """Yield the reply as Server-Sent Events.
+        """Run the model, and its tools, until it has an answer.
 
-        SSE is just a long-lived response with a simple text format: each
-        event is a line starting `data: `, followed by a blank line. We put
-        one JSON object on each line, so the browser can tell the difference
-        between text, token counts and errors.
+        One customer message can take several trips to the model: it asks
+        for a tool, we run it, it reads the result and either asks for
+        another or writes the reply. All of that happens inside this one
+        response, while the customer watches.
         """
         reply = ""
         usage = None
 
-        # Tell the browser which conversation this is, so a new one can be
-        # remembered and sent back with the next message.
         yield sse.event({"type": "conversation", "id": conversation_id})
 
         try:
-            for piece in (first_piece,):
-                if piece is None:
-                    continue
-                if piece["type"] == "text":
-                    reply += piece["text"]
-                yield sse.event(piece)
+            for _ in range(MAX_TOOL_ROUNDS):
+                # Whether the conversation is verified can change mid-turn,
+                # the moment submit_verification_code succeeds — so the
+                # tools on offer are worked out fresh each round.
+                now_verified = await store.verified_customer(conversation_id) is not None
+                requested = []
 
-            async for piece in pieces:
-                if piece["type"] == "text":
-                    reply += piece["text"]
-                elif piece["type"] == "usage":
-                    usage = piece
-                yield sse.event(piece)
+                async for piece in llm.stream(
+                    model=llm.MODEL,
+                    messages=conversation,
+                    max_tokens=config.MAX_REPLY_TOKENS,
+                    tools=tools.tools_for(now_verified),
+                ):
+                    if piece["type"] == "tool_calls":
+                        requested = piece["calls"]
+                        continue  # not for the browser
+                    if piece["type"] == "text":
+                        reply += piece["text"]
+                    elif piece["type"] == "usage":
+                        usage = piece
+                    yield sse.event(piece)
+
+                if not requested:
+                    break  # it answered
+
+                # Record what it asked for, so the next trip can see it.
+                conversation.append(
+                    {
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": [
+                            {
+                                "id": call["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": call["name"],
+                                    "arguments": json.dumps(call["arguments"]),
+                                },
+                            }
+                            for call in requested
+                        ],
+                    }
+                )
+
+                for call in requested:
+                    # Tell the browser what is happening. Without this the
+                    # customer watches a pause and cannot tell the
+                    # difference between working and broken.
+                    yield sse.event({"type": "tool", "name": call["name"], "arguments": call["arguments"]})
+
+                    try:
+                        result = await tools.run(call["name"], call["arguments"], conversation_id, now_verified)
+                    except Exception as error:
+                        # A tool that fails is data the model can work with,
+                        # not a reason to abandon the turn. The detail stays
+                        # in our logs.
+                        print(f"[tool failed] {call['name']}: {type(error).__name__}: {error}")
+                        result = {"error": "That did not work. Tell the customer and offer to try again."}
+
+                    # A return needs a person to agree to it. The client
+                    # draws a button; pressing it is a separate request that
+                    # checks everything again.
+                    if result.get("awaiting_confirmation"):
+                        yield sse.event({"type": "confirm", **result})
+
+                    conversation.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": call["id"],
+                            # WHATEVER IS IN HERE IS DATA, NOT INSTRUCTIONS.
+                            # It contains text customers typed — return
+                            # reasons, order notes. The prompt says so, and
+                            # the tools are scoped so that believing it
+                            # would not grant access to anything.
+                            "content": json.dumps(result),
+                        }
+                    )
+            else:
+                yield sse.error_event("This is taking more steps than expected. Please try asking again.")
 
         except Exception as error:
-            # Past the point of no return: the browser already has part of
-            # the answer and a 200 status. The only way to report this is
-            # inside the stream, and the client has to handle it.
             print(f"[stream broke] {type(error).__name__}: {error}")
             yield sse.error_event("The reply was cut short. Please try again.")
 
         finally:
-            # Save whatever the customer actually saw, even if the stream
-            # died halfway. They read that text; a reload should show it.
-            # Nothing to save only if the reply never started.
             if reply:
                 await store.add_message(conversation_id, "assistant", reply, usage)
 
@@ -221,3 +278,60 @@ async def chat(body: ChatRequest, request: Request):
         media_type=sse.MEDIA_TYPE,
         headers=sse.HEADERS,
     )
+
+
+class ConfirmReturn(BaseModel):
+    """What the client sends when the customer presses Confirm."""
+
+    conversation_id: str
+    order_number: str = Field(min_length=1, max_length=40)
+    item_id: int
+    reason: str = Field(default="", max_length=500)
+
+
+@router.post("/api/returns")
+async def confirm_return(body: ConfirmReturn, request: Request):
+    """Actually open a return, because a person asked for it.
+
+    This is the other half of the approval gate, and the reason it is a
+    separate request rather than another tool.
+
+    The model can propose a return. It cannot open one — there is no tool
+    that does. Opening happens here, reached only by someone pressing a
+    button in their own browser, and everything is checked again from
+    scratch: the conversation belongs to this session, the session is
+    verified, and the order belongs to that customer.
+
+    If the model could confirm its own proposal, an instruction hidden in
+    a tool result could supply the agreement. A button cannot be pressed
+    by a sentence.
+    """
+    owner = owner_of(request)
+    parse_conversation_id(body.conversation_id)
+
+    if not await store.conversation_belongs_to(body.conversation_id, owner):
+        raise NOT_FOUND
+
+    if await store.verified_customer(body.conversation_id) is None:
+        raise NOT_FOUND
+
+    await store.record_access(body.conversation_id, "start_return", body.order_number)
+    opened = await store.open_return(body.conversation_id, body.order_number, body.item_id, body.reason)
+    if opened is None:
+        # The order is not theirs, or the item is not on it. Same answer
+        # either way.
+        raise NOT_FOUND
+
+    # Record it in the conversation, so a reload shows what happened
+    # rather than a proposal with no outcome.
+    await store.add_message(
+        body.conversation_id,
+        "assistant",
+        f"Return opened for {opened['order_number']} — reference {opened['id'][:8]}.",
+    )
+
+    return {
+        "return_id": opened["id"],
+        "order_number": opened["order_number"],
+        "status": opened["status"],
+    }

@@ -5,7 +5,7 @@ import { MessageBubble } from "./components/MessageBubble/MessageBubble";
 import { useChat } from "./hooks/useChat/useChat";
 
 export default function App() {
-  const { messages, send, sending, restoring } = useChat();
+  const { messages, send, confirm, sending, restoring } = useChat();
   const scroller = useRef<HTMLDivElement>(null);
 
   // Follow the reply as it grows. The ref is stable and never a dependency;
@@ -32,8 +32,13 @@ export default function App() {
             </div>
           )}
 
-          {messages.map((message) => (
-            <MessageBubble key={message.id} message={message} />
+          {messages.map((message, index) => (
+            <MessageBubble
+              key={message.id}
+              message={message}
+              onConfirm={message.confirm ? () => confirm(index) : undefined}
+              busy={sending}
+            />
           ))}
         </div>
       </div>
