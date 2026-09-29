@@ -110,7 +110,7 @@ def test_a_stream_that_fails_on_its_first_read_is_retried(monkeypatch):
 
     def chunk(content=None, usage=None):
         delta = SimpleNamespace(content=content, reasoning_content=None)
-        return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=usage)
+        return SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=None)], usage=usage)
 
     class Stream:
         """Fails on the first read the first two times it is opened."""
@@ -144,7 +144,7 @@ def test_the_first_chunk_is_not_lost_when_it_succeeds(monkeypatch):
 
     def chunk(content):
         delta = SimpleNamespace(content=content, reasoning_content=None)
-        return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=None)
+        return SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=None)], usage=None)
 
     class Stream:
         def __aiter__(self):
@@ -192,7 +192,7 @@ def test_no_reasoning_means_no_thinking_tokens(monkeypatch):
 
     def chunk(content=None, usage=None):
         delta = SimpleNamespace(content=content, reasoning_content=None)
-        return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=usage)
+        return SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=None)], usage=usage)
 
     class Stream:
         def __aiter__(self):

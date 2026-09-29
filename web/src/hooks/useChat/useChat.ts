@@ -9,7 +9,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { HttpError, loadConversation, sendMessage } from "../../shared/api";
+import { confirmReturn, HttpError, loadConversation, sendMessage } from "../../shared/api";
 import type { Message } from "../../shared/types";
 
 const STORAGE_KEY = "conversationId";
@@ -146,5 +146,34 @@ export function useChat() {
     [rememberConversation],
   );
 
-  return { messages, send, sending, restoring };
+  const confirm = useCallback(
+    async (index: number) => {
+      const proposal = messages[index]?.confirm;
+      if (!proposal || !conversationId.current) return;
+
+      const write = (change: (m: Message) => Message) =>
+        setMessages((current) => current.map((m, i) => (i === index ? change(m) : m)));
+
+      try {
+        const { return_id } = await confirmReturn(
+          conversationId.current,
+          proposal.order_number,
+          proposal.item_id,
+          proposal.reason,
+        );
+        // Recording the reference also removes the button, so a second
+        // press cannot open a second return.
+        write((m) => ({ ...m, confirmed: return_id }));
+      } catch {
+        write((m) => ({
+          ...m,
+          content: `${m.content}\n\n⚠️ That return could not be opened.`,
+          confirm: undefined,
+        }));
+      }
+    },
+    [messages],
+  );
+
+  return { messages, send, confirm, sending, restoring };
 }

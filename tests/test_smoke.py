@@ -16,7 +16,7 @@ from conftest import fake_stream
 from pydantic import ValidationError
 
 from app import llm, main, routes, store
-from app.prompts import SUPPORT_POLICY
+from app.prompts import SUPPORT_POLICY, VERIFICATION_ONLY
 
 
 def send(client, message="restocking fee?", conversation_id=None):
@@ -90,8 +90,13 @@ def test_usage_arrives_last(client):
     assert (usage["prompt_tokens"] + usage["thinking_tokens"] + usage["answer_tokens"]) == usage["total_tokens"]
 
 
-def test_failure_before_the_reply_starts_is_a_normal_http_error(client, monkeypatch):
-    """Nothing sent yet, so we can still use a status code."""
+def test_a_provider_failure_is_reported_inside_the_stream(client, monkeypatch):
+    """The status is committed before the model is ever called.
+
+    The tool loop makes several model calls per turn, any of which can
+    fail, so every failure now travels as an event rather than as a
+    status code.
+    """
 
     async def refuses_to_start(**kwargs):
         raise RuntimeError("provider is down")
@@ -100,7 +105,8 @@ def test_failure_before_the_reply_starts_is_a_normal_http_error(client, monkeypa
     monkeypatch.setattr(llm, "stream", lambda **kwargs: refuses_to_start())
 
     response = send(client, "hi")
-    assert response.status_code == 502
+    assert response.status_code == 200
+    assert reply_events(response)[-1]["type"] == "error"
     assert "provider" not in response.text.lower(), "internal detail leaked"
 
 
@@ -116,8 +122,14 @@ def test_failure_midway_arrives_inside_the_stream(client, monkeypatch):
     assert "went away" not in events[-1]["message"], "internal detail leaked"
 
 
-def test_policy_is_sent_as_the_first_message(client, monkeypatch):
-    """The policy must lead the prompt, or prefix caching cannot work."""
+def test_an_unverified_conversation_is_not_sent_the_policy(client, monkeypatch):
+    """The strongest control in the application.
+
+    Telling a model "refuse until they verify" is an instruction, and
+    instructions are exactly what prompt injection argues with. Not
+    sending the document means there is nothing to argue about: it cannot
+    disclose what it was never given.
+    """
     captured = {}
 
     def capture(**kwargs):
@@ -129,7 +141,10 @@ def test_policy_is_sent_as_the_first_message(client, monkeypatch):
 
     first = captured["messages"][0]
     assert first["role"] == "system"
-    assert first["content"] == SUPPORT_POLICY
+    assert first["content"] == VERIFICATION_ONLY
+    # Not merely withheld from the answer — absent from the request.
+    assert "restocking fee" not in first["content"]
+    assert SUPPORT_POLICY not in json.dumps(captured["messages"])
 
 
 @pytest.mark.parametrize(
@@ -244,7 +259,7 @@ def test_thinking_tokens_are_estimated_from_how_much_was_reasoning(monkeypatch):
 
     def chunk(reasoning=None, content=None, usage=None):
         delta = SimpleNamespace(content=content, reasoning_content=reasoning)
-        return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=usage)
+        return SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason=None)], usage=usage)
 
     class Stream:
         def __aiter__(self):
